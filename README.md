@@ -164,6 +164,9 @@ Run this first to see the Git actions in plain language:
 devagent git
 ```
 
+In a normal terminal, this opens an interactive selector with arrow-key navigation.
+If arrow-mode is unavailable, DevAgent falls back to a simple numbered menu.
+
 DevAgent now supports:
 
 ```powershell

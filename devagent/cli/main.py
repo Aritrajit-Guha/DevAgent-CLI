@@ -9,7 +9,7 @@ from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
-from devagent.cli.prompts import choose_directory
+from devagent.cli.prompts import MenuChoice, can_use_arrow_menu, choose_directory, choose_menu_action
 from devagent.config.settings import ConfigManager
 from devagent.context.indexer import CodeIndexer
 from devagent.context.retriever import Retriever
@@ -96,10 +96,75 @@ def _print_git_menu() -> None:
     console.print(table)
 
 
+def git_action_choices() -> list[MenuChoice]:
+    return [
+        MenuChoice("See what changed and which branch you're on", "status"),
+        MenuChoice("Stage everything for the next commit", "add_all"),
+        MenuChoice("Stage a specific file or folder", "add_path"),
+        MenuChoice("Create a branch for new work", "branch_create"),
+        MenuChoice("Switch to another branch safely", "branch_switch"),
+        MenuChoice("Commit with an auto-generated message", "commit_auto"),
+        MenuChoice("Suggest a commit message without committing", "commit_suggest"),
+        MenuChoice("Pull the latest changes from the remote", "pull"),
+        MenuChoice("Push your current branch", "push"),
+        MenuChoice("Preview a pull request title and body", "pr_preview"),
+        MenuChoice("Open a pull request with GitHub CLI", "pr_create"),
+        MenuChoice("See which files are stuck in a conflict", "merge_conflicts"),
+        MenuChoice("Abort a merge that went sideways", "merge_abort"),
+        MenuChoice("Continue after resolving conflicts", "merge_continue"),
+        MenuChoice("Exit Git assistant", "exit"),
+    ]
+
+
+def _run_git_menu() -> None:
+    while True:
+        action = choose_menu_action(console, "Choose a Git action", git_action_choices())
+        if not action or action == "exit":
+            return
+        if action == "status":
+            git_status()
+        elif action == "add_all":
+            git_add(".")
+        elif action == "add_path":
+            git_add(Prompt.ask("Path to stage", default="."))
+        elif action == "branch_create":
+            create_branch(Prompt.ask("New branch name"))
+        elif action == "branch_switch":
+            switch_branch(Prompt.ask("Branch to switch to"), force=Confirm.ask("Allow switching with uncommitted changes?", default=False))
+        elif action == "commit_auto":
+            custom = Confirm.ask("Write your own commit message?", default=False)
+            message = Prompt.ask("Commit message") if custom else None
+            git_commit(message=message, all_files=True)
+        elif action == "commit_suggest":
+            suggest_commit(conventional=True)
+        elif action == "pull":
+            git_pull(remote=Prompt.ask("Remote", default="origin"), branch=None, rebase=Confirm.ask("Pull with rebase?", default=False))
+        elif action == "push":
+            git_push(remote=Prompt.ask("Remote", default="origin"), branch=None)
+        elif action == "pr_preview":
+            pr_preview(base=Prompt.ask("Base branch", default="main"))
+        elif action == "pr_create":
+            pr_create(
+                base=Prompt.ask("Base branch", default="main"),
+                title=None,
+                body=None,
+                draft=Confirm.ask("Create this PR as a draft?", default=False),
+            )
+        elif action == "merge_conflicts":
+            merge_conflicts()
+        elif action == "merge_abort":
+            merge_abort()
+        elif action == "merge_continue":
+            merge_continue()
+
+
 @git_app.callback()
 def git_callback(ctx: typer.Context) -> None:
     if ctx.invoked_subcommand is None:
-        _print_git_menu()
+        if can_use_arrow_menu():
+            _run_git_menu()
+        else:
+            _print_git_menu()
 
 
 @workspace_app.command("bind")

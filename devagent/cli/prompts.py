@@ -1,10 +1,54 @@
 from __future__ import annotations
 
+import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
+
+
+@dataclass(frozen=True)
+class MenuChoice:
+    label: str
+    value: str
+
+
+def can_use_arrow_menu() -> bool:
+    return bool(sys.stdin.isatty() and sys.stdout.isatty())
+
+
+def choose_menu_action(console: Console, title: str, choices: list[MenuChoice]) -> str | None:
+    if not choices:
+        return None
+
+    if can_use_arrow_menu():
+        try:
+            import questionary
+
+            answer = questionary.select(
+                title,
+                choices=[
+                    questionary.Choice(title=choice.label, value=choice.value)
+                    for choice in choices
+                ],
+                use_indicator=True,
+                use_shortcuts=False,
+            ).ask()
+            if answer is not None:
+                return str(answer)
+        except Exception:
+            pass
+
+    table = Table(title=title)
+    table.add_column("#", justify="right")
+    table.add_column("Action")
+    for index, choice in enumerate(choices, start=1):
+        table.add_row(str(index), choice.label)
+    console.print(table)
+    picked = Prompt.ask("Choose action", choices=[str(index) for index in range(1, len(choices) + 1)], default="1")
+    return choices[int(picked) - 1].value
 
 
 def visible_directories(path: Path, limit: int = 50) -> list[Path]:
