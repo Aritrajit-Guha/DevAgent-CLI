@@ -16,7 +16,7 @@ from devagent.context.retriever import Retriever
 from devagent.core.agent import RepoAgent
 from devagent.core.project import detect_project
 from devagent.tools.edit_tool import EditAgent
-from devagent.tools.git_tool import GitTool
+from devagent.tools.git_tool import GitError, GitTool
 from devagent.tools.insights import Inspector
 from devagent.tools.node_tool import find_node_packages
 from devagent.tools.setup_tool import SetupTool
@@ -26,8 +26,10 @@ app = typer.Typer(help="Local-first agentic AI developer assistant.")
 workspace_app = typer.Typer(help="Bind and inspect the active workspace.")
 setup_app = typer.Typer(help="Clone projects or publish local projects to GitHub.")
 new_app = typer.Typer(help="Guided onboarding flows for new or existing projects.")
-git_app = typer.Typer(help="Git workflow automation.")
+git_app = typer.Typer(help="Git workflow automation.", invoke_without_command=True)
 branch_app = typer.Typer(help="Branch helpers.")
+pr_app = typer.Typer(help="Pull request helpers.")
+merge_app = typer.Typer(help="Merge conflict helpers.")
 commit_app = typer.Typer(help="Commit message helpers.")
 
 app.add_typer(workspace_app, name="workspace")
@@ -36,6 +38,8 @@ app.add_typer(new_app, name="new")
 app.add_typer(git_app, name="git")
 app.add_typer(commit_app, name="commit")
 git_app.add_typer(branch_app, name="branch")
+git_app.add_typer(pr_app, name="pr")
+git_app.add_typer(merge_app, name="merge")
 
 console = Console()
 
@@ -65,6 +69,37 @@ def _print_project_status(path: Path) -> None:
         changed = git.changed_files()
         table.add_row("Changed files", "\n".join(changed) if changed else "none")
     console.print(table)
+
+
+def _git_tool() -> GitTool:
+    return GitTool(_workspace_path())
+
+
+def _print_git_menu() -> None:
+    table = Table(title="DevAgent Git")
+    table.add_column("What You Want")
+    table.add_column("Command To Run")
+    table.add_row("See what changed and which branch you're on", "devagent git status")
+    table.add_row("Stage everything for the next commit", "devagent git add")
+    table.add_row("Stage a specific file or folder", "devagent git add <path>")
+    table.add_row("Create a branch for new work", "devagent git branch create <name>")
+    table.add_row("Switch to another branch safely", "devagent git branch switch <name>")
+    table.add_row("Commit with an auto-generated message", "devagent git commit --all")
+    table.add_row("Suggest a commit message without committing", "devagent commit suggest")
+    table.add_row("Pull the latest changes from the remote", "devagent git pull")
+    table.add_row("Push your current branch", "devagent git push")
+    table.add_row("Preview a pull request title and body", "devagent git pr preview")
+    table.add_row("Open a pull request with GitHub CLI", "devagent git pr create")
+    table.add_row("See which files are stuck in a conflict", "devagent git merge conflicts")
+    table.add_row("Abort a merge that went sideways", "devagent git merge abort")
+    table.add_row("Continue after resolving conflicts", "devagent git merge continue")
+    console.print(table)
+
+
+@git_app.callback()
+def git_callback(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        _print_git_menu()
 
 
 @workspace_app.command("bind")
@@ -222,14 +257,29 @@ def edit(
 
 @git_app.command("status")
 def git_status() -> None:
-    tool = GitTool(_workspace_path())
+    tool = _git_tool()
     console.print(tool.status_text())
+
+
+@git_app.command("add")
+def git_add(path: str = typer.Argument(".", help="Path to stage. Defaults to the whole workspace.")) -> None:
+    tool = _git_tool()
+    try:
+        tool.add(path)
+    except GitError as exc:
+        console.print(Panel(str(exc), title="Git Add Failed", style="red"))
+        raise typer.Exit(code=1) from exc
+    console.print(f"Staged [bold]{path}[/bold].")
 
 
 @branch_app.command("create")
 def create_branch(name: str = typer.Argument(..., help="New branch name.")) -> None:
-    tool = GitTool(_workspace_path())
-    tool.create_branch(name)
+    tool = _git_tool()
+    try:
+        tool.create_branch(name)
+    except GitError as exc:
+        console.print(Panel(str(exc), title="Branch Create Failed", style="red"))
+        raise typer.Exit(code=1) from exc
     console.print(f"Created and switched to branch [bold]{name}[/bold].")
 
 
@@ -238,35 +288,123 @@ def switch_branch(
     name: str = typer.Argument(..., help="Branch to switch to."),
     force: bool = typer.Option(False, "--force", help="Allow switching with uncommitted changes."),
 ) -> None:
-    tool = GitTool(_workspace_path())
+    tool = _git_tool()
     if tool.has_changes() and not force:
         raise typer.BadParameter("Uncommitted changes exist. Commit/stash them or pass --force.")
-    tool.switch_branch(name)
+    try:
+        tool.switch_branch(name)
+    except GitError as exc:
+        console.print(Panel(str(exc), title="Branch Switch Failed", style="red"))
+        raise typer.Exit(code=1) from exc
     console.print(f"Switched to branch [bold]{name}[/bold].")
 
 
 @git_app.command("commit")
 def git_commit(
     message: Optional[str] = typer.Option(None, "--message", "-m", help="Commit message."),
-    all_files: bool = typer.Option(False, "--all", "-a", help="Stage all changed files before committing."),
+    all_files: bool = typer.Option(True, "--all/--staged-only", "-a/-s", help="Stage all changed files before committing."),
 ) -> None:
-    tool = GitTool(_workspace_path())
+    tool = _git_tool()
     final_message = message or tool.suggest_commit_message()
-    commit_id = tool.commit(final_message, all_files=all_files)
+    try:
+        commit_id = tool.commit(final_message, all_files=all_files)
+    except GitError as exc:
+        console.print(Panel(str(exc), title="Commit Failed", style="red"))
+        raise typer.Exit(code=1) from exc
     console.print(f"Created commit [bold]{commit_id}[/bold]: {final_message}")
+
+
+@git_app.command("pull")
+def git_pull(
+    remote: str = "origin",
+    branch: Optional[str] = None,
+    rebase: bool = typer.Option(False, "--rebase", help="Pull with rebase instead of merge."),
+) -> None:
+    tool = _git_tool()
+    try:
+        tool.pull(remote=remote, branch=branch, rebase=rebase)
+    except GitError as exc:
+        console.print(Panel(str(exc), title="Pull Failed", style="red"))
+        raise typer.Exit(code=1) from exc
+    console.print(f"Pulled [bold]{branch or tool.current_branch() or 'current branch'}[/bold] from [bold]{remote}[/bold].")
 
 
 @git_app.command("push")
 def git_push(remote: str = "origin", branch: Optional[str] = None) -> None:
-    tool = GitTool(_workspace_path())
+    tool = _git_tool()
     target_branch = branch or tool.current_branch()
-    tool.push(remote=remote, branch=target_branch)
+    try:
+        tool.push(remote=remote, branch=target_branch)
+    except GitError as exc:
+        console.print(Panel(str(exc), title="Push Failed", style="red"))
+        raise typer.Exit(code=1) from exc
     console.print(f"Pushed [bold]{target_branch}[/bold] to [bold]{remote}[/bold].")
+
+
+@pr_app.command("preview")
+def pr_preview(base: str = typer.Option("main", "--base", help="Base branch for the pull request.")) -> None:
+    tool = _git_tool()
+    title = tool.pr_title()
+    body = tool.pr_body(base=base)
+    console.print(Panel(f"[bold]Title[/bold]\n{title}\n\n[bold]Body[/bold]\n{body}", title="Pull Request Preview"))
+
+
+@pr_app.command("create")
+def pr_create(
+    base: str = typer.Option("main", "--base", help="Base branch for the pull request."),
+    title: Optional[str] = typer.Option(None, "--title", help="Override the generated PR title."),
+    body: Optional[str] = typer.Option(None, "--body", help="Override the generated PR body."),
+    draft: bool = typer.Option(False, "--draft", help="Create the pull request as a draft."),
+) -> None:
+    tool = _git_tool()
+    try:
+        url = tool.create_pr(base=base, title=title, body=body, draft=draft)
+    except GitError as exc:
+        console.print(Panel(str(exc), title="PR Failed", style="red"))
+        raise typer.Exit(code=1) from exc
+    console.print(Panel(url or "Pull request created.", title="Pull Request"))
+
+
+@merge_app.command("conflicts")
+def merge_conflicts() -> None:
+    tool = _git_tool()
+    files = tool.conflict_files()
+    if not files:
+        console.print("[green]No merge conflicts detected.[/green]")
+        return
+    table = Table(title="Merge Conflicts")
+    table.add_column("File")
+    table.add_column("Conflict Markers")
+    for file in files:
+        table.add_row(file, str(tool.conflict_marker_count(file)))
+    console.print(table)
+
+
+@merge_app.command("abort")
+def merge_abort() -> None:
+    tool = _git_tool()
+    try:
+        tool.merge_abort()
+    except GitError as exc:
+        console.print(Panel(str(exc), title="Merge Abort Failed", style="red"))
+        raise typer.Exit(code=1) from exc
+    console.print("[green]Aborted the merge.[/green]")
+
+
+@merge_app.command("continue")
+def merge_continue() -> None:
+    tool = _git_tool()
+    try:
+        tool.merge_continue()
+    except GitError as exc:
+        console.print(Panel(str(exc), title="Merge Continue Failed", style="red"))
+        raise typer.Exit(code=1) from exc
+    console.print("[green]Continued the merge.[/green]")
 
 
 @commit_app.command("suggest")
 def suggest_commit(conventional: bool = typer.Option(True, "--conventional/--plain")) -> None:
-    tool = GitTool(_workspace_path())
+    tool = _git_tool()
     console.print(tool.suggest_commit_message(conventional=conventional))
 
 

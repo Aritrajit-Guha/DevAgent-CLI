@@ -42,10 +42,13 @@ devagent setup publish .
 devagent index
 devagent chat "Explain the project structure"
 devagent packages
+devagent git
+devagent git add
+devagent git commit
+devagent git pr preview
 devagent edit "Add logging to login function"
 devagent git status
 devagent git branch create feature/login
-devagent commit suggest
 devagent watch
 devagent inspect
 ```
@@ -152,6 +155,35 @@ devagent edit "Add a short comment above the workspace bind command"
 ```
 
 DevAgent will show a diff and ask before applying it.
+
+## Git Assistant
+
+Run this first to see the Git actions in plain language:
+
+```powershell
+devagent git
+```
+
+DevAgent now supports:
+
+```powershell
+devagent git status
+devagent git add
+devagent git add client/package.json
+devagent git branch create feature/login
+devagent git branch switch main
+devagent git commit
+devagent git pull
+devagent git push
+devagent git pr preview
+devagent git pr create
+devagent git merge conflicts
+devagent git merge abort
+devagent git merge continue
+```
+
+`devagent git commit` stages all changes by default and auto-generates a commit
+message unless you pass `--message`.
 
 ## Guided Project Setup
 
