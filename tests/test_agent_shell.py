@@ -4,7 +4,7 @@ from typer.testing import CliRunner
 
 from devagent.cli.main import app
 from devagent.core.agent import RepoAgent
-from devagent.core.shell import AgentShell, interactive_terminal
+from devagent.core.shell import AgentShell, home_menu_choices, interactive_terminal
 from devagent.tools.runtime_tool import LaunchSpec
 
 
@@ -112,6 +112,65 @@ def test_shell_routes_saved_phrase_runtime_and_chat(tmp_path: Path, monkeypatch)
     clear_result = shell.handle_input("/clear")
     assert clear_result is not None
     assert shell.repo_agent.cleared is True
+
+
+def test_shell_quick_command_routes_git_intent(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    shell = AgentShell(workspace)
+
+    commit_calls: list[tuple[str | None, bool]] = []
+    shell.actions.git_commit = lambda message=None, all_files=True: commit_calls.append((message, all_files)) or type(
+        "Outcome",
+        (),
+        {"commit_id": "abc123", "message": "feat: update project changes"},
+    )()
+
+    result = shell.handle_input("commit my changes")
+
+    assert result is not None
+    assert result.title == "Commit Complete"
+    assert commit_calls == [(None, True)]
+    assert "abc123" in str(result.message)
+
+
+def test_chat_mode_preserves_phrase_match_and_menu_command(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "frontend").mkdir()
+    (workspace / "frontend" / "package.json").write_text('{"scripts": {"dev": "vite"}}', encoding="utf-8")
+
+    shell = AgentShell(workspace)
+    shell.repo_agent = FakeRepoAgent()
+    shell.run_tool.save_detected_profile("Start the site", open_browser=True)
+    launches: list[str] = []
+    shell.run_tool.launch_profile = lambda profile, open_browser=None: launches.append(profile.phrase) or profile.specs
+
+    phrase_result = shell.handle_chat_input("start the site")
+    menu_result = shell.handle_chat_input("/menu")
+
+    assert phrase_result is not None
+    assert phrase_result.title == "Saved Run Phrase"
+    assert launches == ["Start the site"]
+    assert menu_result is not None
+    assert menu_result.return_to_menu is True
+
+
+def test_home_menu_choices_cover_all_modes() -> None:
+    labels = [choice.label for choice in home_menu_choices()]
+
+    assert labels == [
+        "Chat",
+        "Git",
+        "Run",
+        "Repo",
+        "Setup",
+        "Edit",
+        "Watch",
+        "Quick command / phrase",
+        "Help",
+        "Exit",
+    ]
 
 
 def test_devagent_no_args_prints_help_when_not_interactive(monkeypatch) -> None:

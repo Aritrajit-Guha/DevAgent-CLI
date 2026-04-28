@@ -7,20 +7,19 @@ import typer
 from rich.prompt import Confirm, Prompt
 
 from devagent.cli.prompts import MenuChoice, can_use_arrow_menu, choose_directory, choose_menu_action
+from devagent.cli.renderers import (
+    insights_renderable,
+    merge_conflicts_renderable,
+    packages_renderable,
+    run_inventory_renderable,
+    run_launch_message,
+    workspace_status_table,
+)
 from devagent.cli.ui import app_panel, app_table, console, hero_panel, status_badge, styled_path, toned_message
 from devagent.config.settings import ConfigManager
-from devagent.context.indexer import CodeIndexer
-from devagent.context.retriever import Retriever
-from devagent.core.agent import RepoAgent
-from devagent.core.project import detect_project
+from devagent.core.actions import DevAgentActions, bind_workspace_action, snapshot_workspace
 from devagent.core.shell import AgentShell, interactive_terminal
-from devagent.tools.edit_tool import EditAgent
-from devagent.tools.git_tool import GitError, GitTool
-from devagent.tools.insights import Inspector
-from devagent.tools.node_tool import find_node_packages
-from devagent.tools.runtime_tool import RunTool
-from devagent.tools.setup_tool import SetupTool
-from devagent.watcher.file_watcher import WatchService
+from devagent.tools.git_tool import GitError
 
 app = typer.Typer(help="Local-first agentic AI developer assistant.", invoke_without_command=True, no_args_is_help=False)
 workspace_app = typer.Typer(help="Bind and inspect the active workspace.")
@@ -55,25 +54,8 @@ def app_callback(ctx: typer.Context) -> None:
             console.print(ctx.get_help())
             raise typer.Exit()
         shell = AgentShell(config.workspace_path)
-        console.print(hero_panel("Agent Shell", "Talk to DevAgent naturally, trigger saved phrases, and drive the repo from one prompt."))
-        console.print(app_panel(shell.welcome_message(), "Workspace Linked", tone="info", expand=False))
-        while True:
-            try:
-                prompt_text = "[bold bright_cyan]devagent[/bold bright_cyan] [bright_black]>[/bright_black] "
-                user_input = console.input(prompt_text)
-            except (EOFError, KeyboardInterrupt):
-                console.print()
-                raise typer.Exit()
-            try:
-                result = shell.handle_input(user_input)
-            except RuntimeError as exc:
-                console.print(app_panel(str(exc), "Shell Action Failed", tone="error", expand=False))
-                continue
-            if not result:
-                continue
-            console.print(app_panel(result.message, result.title, tone=result.tone, expand=False))
-            if result.exit_shell:
-                raise typer.Exit()
+        shell.run()
+        raise typer.Exit()
     console.print(ctx.get_help())
     raise typer.Exit()
 
@@ -88,29 +70,18 @@ def _workspace_path(explicit: Optional[Path] = None) -> Path:
 
 
 def _print_project_status(path: Path) -> None:
-    project = detect_project(path)
-    git = GitTool(path)
-    table = app_table("Workspace Status")
-    table.add_column("Field")
-    table.add_column("Value")
-    table.add_row("Path", styled_path(str(project.path)))
-    table.add_row("Project type", ", ".join(project.project_types) or "unknown")
-    table.add_row("Package files", ", ".join(project.package_files) or "none")
-    table.add_row("Git repository", status_badge("yes", "success") if git.is_repo else status_badge("no", "warning"))
-    if git.is_repo:
-        table.add_row("Branch", toned_message(git.current_branch() or "unknown", "info"))
-        table.add_row("Dirty", status_badge("yes", "warning") if git.has_changes() else status_badge("no", "success"))
-        changed = git.changed_files()
-        table.add_row("Changed files", "\n".join(changed) if changed else "none")
-    console.print(table)
+    console.print(workspace_status_table(snapshot_workspace(path)))
 
 
-def _git_tool() -> GitTool:
-    return GitTool(_workspace_path())
+def _actions(explicit: Optional[Path] = None) -> DevAgentActions:
+    return DevAgentActions(_workspace_path(explicit))
 
 
-def _run_tool() -> RunTool:
-    return RunTool(_workspace_path())
+def _print_run_menu() -> None:
+    actions = _actions()
+    inventory = actions.run_inventory()
+    console.print(hero_panel("Runtime Agent", "Spin up services, attach environments, and open the app in one move."))
+    console.print(run_inventory_renderable(actions.workspace, inventory))
 
 
 def _print_git_menu() -> None:
@@ -133,36 +104,6 @@ def _print_git_menu() -> None:
     table.add_row("Abort a merge that went sideways", "devagent git merge abort")
     table.add_row("Continue after resolving conflicts", "devagent git merge continue")
     console.print(table)
-
-
-def _print_run_menu() -> None:
-    tool = _run_tool()
-    detected = tool.detect_launch_specs()
-    saved = tool.saved_profiles()
-
-    console.print(hero_panel("Runtime Agent", "Spin up services, attach environments, and open the app in one move."))
-
-    detected_table = app_table("Detected Run Targets")
-    detected_table.add_column("Name")
-    detected_table.add_column("Folder")
-    detected_table.add_column("Command")
-    if detected:
-        for spec in detected:
-            detected_table.add_row(spec.name, spec.scope(tool.workspace), spec.display_command)
-    else:
-        detected_table.add_row("No launchable services detected", "-", "-")
-    console.print(detected_table)
-
-    saved_table = app_table("Saved Run Phrases")
-    saved_table.add_column("Phrase")
-    saved_table.add_column("Browser")
-    saved_table.add_column("Targets")
-    if saved:
-        for phrase, profile in saved.items():
-            saved_table.add_row(phrase, "yes" if profile.open_browser else "no", "\n".join(spec.name for spec in profile.specs))
-    else:
-        saved_table.add_row("No saved phrases yet", "-", "-")
-    console.print(saved_table)
 
 
 def git_action_choices() -> list[MenuChoice]:
@@ -249,12 +190,12 @@ def run_callback(ctx: typer.Context) -> None:
 
 @workspace_app.command("bind")
 def bind_workspace(path: Path = typer.Argument(..., help="Project folder to attach DevAgent to.")) -> None:
-    resolved = path.expanduser().resolve()
-    if not resolved.exists() or not resolved.is_dir():
-        raise typer.BadParameter(f"Workspace does not exist or is not a directory: {resolved}")
-    ConfigManager.bind_workspace(resolved)
-    console.print(app_panel(f"Bound workspace:\n{resolved}", "Workspace Linked", tone="success", expand=False))
-    _print_project_status(resolved)
+    try:
+        snapshot = bind_workspace_action(path)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    console.print(app_panel(f"Bound workspace:\n{snapshot.project.path}", "Workspace Linked", tone="success", expand=False))
+    console.print(workspace_status_table(snapshot))
 
 
 @workspace_app.command("status")
@@ -269,12 +210,12 @@ def clone_repo(
     install_deps: bool = typer.Option(False, "--install-deps", help="Install detected dependencies after clone."),
     open_code: bool = typer.Option(False, "--open-code", help="Open the cloned project in VS Code."),
 ) -> None:
+    actions = DevAgentActions(_workspace_path() if ConfigManager.load().workspace_path else Path.cwd())
     try:
-        result = SetupTool.clone_from_github(repo_url, target, install_deps=install_deps, open_code=open_code)
-    except RuntimeError as exc:
+        result = actions.clone_repo(repo_url, target=target, install_deps=install_deps, open_code=open_code)
+    except (RuntimeError, ValueError) as exc:
         console.print(app_panel(str(exc), "Setup Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
-    ConfigManager.bind_workspace(result.path)
     console.print(app_panel(result.message, "Clone Complete", tone="success", expand=False))
     _print_project_status(result.path)
 
@@ -297,12 +238,12 @@ def publish_repo(
     private: bool = typer.Option(False, "--private", help="Create a private GitHub repository."),
     push: bool = typer.Option(True, "--push/--no-push", help="Push after creating the remote repository."),
 ) -> None:
+    actions = DevAgentActions(_workspace_path() if ConfigManager.load().workspace_path else Path.cwd())
     try:
-        result = SetupTool.publish_to_github(path, repo_name=repo_name, private=private, push=push)
+        result = actions.publish_repo(path, repo_name=repo_name, private=private, push=push)
     except (RuntimeError, ValueError) as exc:
         console.print(app_panel(str(exc), "Publish Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
-    ConfigManager.bind_workspace(result.path)
     console.print(app_panel(result.message, "Publish Complete", tone="success", expand=False))
 
 
@@ -346,9 +287,9 @@ def new_project(
 
 @app.command("index")
 def index_workspace(path: Optional[Path] = typer.Option(None, "--path", "-p", help="Workspace path override.")) -> None:
-    workspace = _workspace_path(path)
-    index = CodeIndexer(workspace).build()
-    console.print(app_panel(f"Indexed {len(index.records)} chunks from\n{workspace}", "Index Complete", tone="success", expand=False))
+    actions = _actions(path)
+    count = actions.index_workspace()
+    console.print(app_panel(f"Indexed {count} chunks from\n{actions.workspace}", "Index Complete", tone="success", expand=False))
 
 
 @app.command("chat")
@@ -357,27 +298,20 @@ def chat(
     deep: bool = typer.Option(False, "--deep", help="Use broader retrieval and the deep Gemini model when configured."),
     new_session: bool = typer.Option(False, "--new-session", help="Clear saved workspace chat context before answering."),
 ) -> None:
-    workspace = _workspace_path()
-    answer = RepoAgent(workspace).answer(question, deep=deep, new_session=new_session)
+    answer = _actions().chat(question, deep=deep, new_session=new_session)
     console.print(app_panel(answer, "DevAgent Response", tone="info"))
 
 
 @app.command("packages")
 def packages() -> None:
     """List direct Node packages from package.json files in the active workspace."""
-    workspace = _workspace_path()
-    node_packages = find_node_packages(workspace)
-    if not node_packages:
-        console.print(app_panel(f"No package.json dependencies found.\nActive workspace: {workspace}", "Package Scan", tone="warning", expand=False))
-        return
-    table = app_table("Node Packages")
-    table.add_column("Manifest")
-    table.add_column("Section")
-    table.add_column("Package")
-    table.add_column("Version")
-    for package in node_packages:
-        table.add_row(package.manifest, package.section, package.name, package.version)
-    console.print(table)
+    actions = _actions()
+    node_packages = actions.packages()
+    renderable = packages_renderable(actions.workspace, node_packages)
+    if node_packages:
+        console.print(renderable)
+    else:
+        console.print(app_panel(renderable, "Package Scan", tone="warning", expand=False))
 
 
 @run_app.command("start")
@@ -385,26 +319,13 @@ def run_start(
     phrase: Optional[str] = typer.Argument(None, help="Saved run phrase to launch. Defaults to detected services."),
     open_browser: bool = typer.Option(True, "--open-browser/--no-open-browser", help="Open the detected local app URL after launching services."),
 ) -> None:
-    tool = _run_tool()
+    actions = _actions()
     try:
-        specs = tool.launch_saved(phrase, open_browser=open_browser) if phrase else tool.launch_detected(open_browser=open_browser)
+        result = actions.run_start(phrase, open_browser=open_browser)
     except RuntimeError as exc:
         console.print(app_panel(str(exc), "Run Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
-
-    sections = []
-    for spec in specs:
-        sections.append(
-            f"Launched {spec.name} in {spec.scope(tool.workspace)}\n"
-            f"Command: {spec.display_command}"
-        )
-    if phrase:
-        sections.insert(0, f"Used saved run phrase: {phrase}")
-    if open_browser:
-        browser_url = next((spec.browser_url for spec in specs if spec.browser_url), None)
-        if browser_url:
-            sections.append(f"Opened browser at {browser_url}")
-    console.print(app_panel("\n\n".join(sections), "Services Started", tone="success", expand=False))
+    console.print(app_panel(run_launch_message(actions.workspace, result), "Services Started", tone="success", expand=False))
 
 
 @run_app.command("save")
@@ -415,27 +336,26 @@ def run_save(
     open_browser: bool = typer.Option(False, "--open-browser/--no-open-browser", help="Remember whether this phrase should open the browser after launch."),
     description: Optional[str] = typer.Option(None, "--description", help="Optional note about what this phrase launches."),
 ) -> None:
-    tool = _run_tool()
+    actions = _actions()
     try:
-        if command:
-            profile = tool.save_manual_profile(phrase, command, cwd=cwd, open_browser=open_browser, description=description)
-            spec = profile.specs[0]
-            body = (
-                f"Saved phrase {phrase}\n\n"
-                f"Folder: {spec.scope(tool.workspace)}\n"
-                f"Command: {spec.display_command}\n"
-                f"Open browser: {'yes' if profile.open_browser else 'no'}"
-            )
-        else:
-            profile = tool.save_detected_profile(phrase, open_browser=open_browser, description=description)
-            body = (
-                f"Saved phrase {phrase} for the detected stack.\n\n"
-                + "\n".join(f"- {spec.scope(tool.workspace)}: {spec.display_command}" for spec in profile.specs)
-                + f"\n\nOpen browser: {'yes' if profile.open_browser else 'no'}"
-            )
+        profile = actions.save_run_profile(phrase, command=command, cwd=cwd, open_browser=open_browser, description=description)
     except RuntimeError as exc:
         console.print(app_panel(str(exc), "Save Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
+    if command:
+        spec = profile.specs[0]
+        body = (
+            f"Saved phrase {phrase}\n\n"
+            f"Folder: {spec.scope(actions.workspace)}\n"
+            f"Command: {spec.display_command}\n"
+            f"Open browser: {'yes' if profile.open_browser else 'no'}"
+        )
+    else:
+        body = (
+            f"Saved phrase {phrase} for the detected stack.\n\n"
+            + "\n".join(f"- {spec.scope(actions.workspace)}: {spec.display_command}" for spec in profile.specs)
+            + f"\n\nOpen browser: {'yes' if profile.open_browser else 'no'}"
+        )
     console.print(app_panel(body, "Run Phrase Saved", tone="success", expand=False))
 
 
@@ -448,8 +368,7 @@ def run_list() -> None:
 def run_forget(
     phrase: str = typer.Argument(..., help="Saved run phrase to delete."),
 ) -> None:
-    tool = _run_tool()
-    deleted = tool.delete_profile(phrase)
+    deleted = _actions().delete_run_profile(phrase)
     if not deleted:
         console.print(app_panel(f"No saved run phrase found: {phrase}", "Nothing Deleted", tone="warning", expand=False))
         raise typer.Exit(code=1)
@@ -461,15 +380,14 @@ def edit(
     instruction: str = typer.Argument(..., help="Natural language code edit instruction."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Apply the proposed diff without prompting."),
 ) -> None:
-    workspace = _workspace_path()
-    edit_agent = EditAgent(workspace)
-    proposal = edit_agent.propose(instruction)
+    actions = _actions()
+    proposal = actions.edit_propose(instruction)
     console.print(app_panel(proposal.diff or proposal.message, "Proposed Change", tone="info"))
     if not proposal.diff:
         raise typer.Exit(code=1)
     if yes or typer.confirm("Apply this diff?"):
         try:
-            edit_agent.apply(proposal)
+            actions.edit_apply(proposal)
         except RuntimeError as exc:
             console.print(app_panel(str(exc), "Edit Failed", tone="error", expand=False))
             console.print(toned_message("No files were changed.", "warning"))
@@ -481,16 +399,19 @@ def edit(
 
 @git_app.command("status")
 def git_status() -> None:
-    tool = _git_tool()
-    console.print(app_panel(tool.status_text(), "Git Status", tone="info", expand=False))
+    try:
+        status = _actions().git_status()
+    except GitError as exc:
+        console.print(app_panel(str(exc), "Git Status Failed", tone="error", expand=False))
+        raise typer.Exit(code=1) from exc
+    console.print(app_panel(status, "Git Status", tone="info", expand=False))
 
 
 @git_app.command("add")
 def git_add(path: str = typer.Argument(".", help="Path to stage. Defaults to the whole workspace.")) -> None:
-    tool = _git_tool()
     try:
-        tool.add(path)
-    except GitError as exc:
+        _actions().git_add(path)
+    except (GitError, ValueError) as exc:
         console.print(app_panel(str(exc), "Git Add Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
     if path == ".":
@@ -501,9 +422,8 @@ def git_add(path: str = typer.Argument(".", help="Path to stage. Defaults to the
 
 @branch_app.command("create")
 def create_branch(name: str = typer.Argument(..., help="New branch name.")) -> None:
-    tool = _git_tool()
     try:
-        tool.create_branch(name)
+        _actions().git_create_branch(name)
     except GitError as exc:
         console.print(app_panel(str(exc), "Branch Create Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
@@ -515,11 +435,10 @@ def switch_branch(
     name: str = typer.Argument(..., help="Branch to switch to."),
     force: bool = typer.Option(False, "--force", help="Allow switching with uncommitted changes."),
 ) -> None:
-    tool = _git_tool()
-    if tool.has_changes() and not force:
-        raise typer.BadParameter("Uncommitted changes exist. Commit/stash them or pass --force.")
     try:
-        tool.switch_branch(name)
+        _actions().git_switch_branch(name, force=force)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     except GitError as exc:
         console.print(app_panel(str(exc), "Branch Switch Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
@@ -531,14 +450,12 @@ def git_commit(
     message: Optional[str] = typer.Option(None, "--message", "-m", help="Commit message."),
     all_files: bool = typer.Option(True, "--all/--staged-only", "-a/-s", help="Stage all changed files before committing."),
 ) -> None:
-    tool = _git_tool()
-    final_message = message or tool.suggest_commit_message()
     try:
-        commit_id = tool.commit(final_message, all_files=all_files)
+        outcome = _actions().git_commit(message=message, all_files=all_files)
     except GitError as exc:
         console.print(app_panel(str(exc), "Commit Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
-    console.print(app_panel(f"Created commit {commit_id}\n\n{final_message}", "Commit Complete", tone="success", expand=False))
+    console.print(app_panel(f"Created commit {outcome.commit_id}\n\n{outcome.message}", "Commit Complete", tone="success", expand=False))
 
 
 @git_app.command("pull")
@@ -547,21 +464,18 @@ def git_pull(
     branch: Optional[str] = None,
     rebase: bool = typer.Option(False, "--rebase", help="Pull with rebase instead of merge."),
 ) -> None:
-    tool = _git_tool()
     try:
-        tool.pull(remote=remote, branch=branch, rebase=rebase)
+        current_branch = _actions().git_pull(remote=remote, branch=branch, rebase=rebase)
     except GitError as exc:
         console.print(app_panel(str(exc), "Pull Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
-    console.print(toned_message(f"Pulled {branch or tool.current_branch() or 'current branch'} from {remote}.", "success"))
+    console.print(toned_message(f"Pulled {current_branch} from {remote}.", "success"))
 
 
 @git_app.command("push")
 def git_push(remote: str = "origin", branch: Optional[str] = None) -> None:
-    tool = _git_tool()
-    target_branch = branch or tool.current_branch()
     try:
-        tool.push(remote=remote, branch=target_branch)
+        target_branch = _actions().git_push(remote=remote, branch=branch)
     except GitError as exc:
         console.print(app_panel(str(exc), "Push Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
@@ -570,10 +484,8 @@ def git_push(remote: str = "origin", branch: Optional[str] = None) -> None:
 
 @pr_app.command("preview")
 def pr_preview(base: str = typer.Option("main", "--base", help="Base branch for the pull request.")) -> None:
-    tool = _git_tool()
-    title = tool.pr_title()
-    body = tool.pr_body(base=base)
-    console.print(app_panel(f"TITLE\n{title}\n\nBODY\n{body}", "Pull Request Preview", tone="info"))
+    preview = _actions().pr_preview(base=base)
+    console.print(app_panel(f"TITLE\n{preview.title}\n\nBODY\n{preview.body}", "Pull Request Preview", tone="info"))
 
 
 @pr_app.command("create")
@@ -583,9 +495,8 @@ def pr_create(
     body: Optional[str] = typer.Option(None, "--body", help="Override the generated PR body."),
     draft: bool = typer.Option(False, "--draft", help="Create the pull request as a draft."),
 ) -> None:
-    tool = _git_tool()
     try:
-        url = tool.create_pr(base=base, title=title, body=body, draft=draft)
+        url = _actions().pr_create(base=base, title=title, body=body, draft=draft)
     except GitError as exc:
         console.print(app_panel(str(exc), "PR Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
@@ -594,24 +505,18 @@ def pr_create(
 
 @merge_app.command("conflicts")
 def merge_conflicts() -> None:
-    tool = _git_tool()
-    files = tool.conflict_files()
-    if not files:
-        console.print(toned_message("No merge conflicts detected.", "success"))
-        return
-    table = app_table("Merge Conflicts")
-    table.add_column("File")
-    table.add_column("Conflict Markers")
-    for file in files:
-        table.add_row(file, str(tool.conflict_marker_count(file)))
-    console.print(table)
+    conflicts = _actions().merge_conflicts()
+    renderable = merge_conflicts_renderable(conflicts)
+    if conflicts:
+        console.print(renderable)
+    else:
+        console.print(toned_message(str(renderable), "success"))
 
 
 @merge_app.command("abort")
 def merge_abort() -> None:
-    tool = _git_tool()
     try:
-        tool.merge_abort()
+        _actions().merge_abort()
     except GitError as exc:
         console.print(app_panel(str(exc), "Merge Abort Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
@@ -620,9 +525,8 @@ def merge_abort() -> None:
 
 @merge_app.command("continue")
 def merge_continue() -> None:
-    tool = _git_tool()
     try:
-        tool.merge_continue()
+        _actions().merge_continue()
     except GitError as exc:
         console.print(app_panel(str(exc), "Merge Continue Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
@@ -631,9 +535,8 @@ def merge_continue() -> None:
 
 @commit_app.command("suggest")
 def suggest_commit(conventional: bool = typer.Option(True, "--conventional/--plain")) -> None:
-    tool = _git_tool()
     try:
-        console.print(app_panel(tool.suggest_commit_message(conventional=conventional), "Commit Suggestion", tone="info", expand=False))
+        console.print(app_panel(_actions().suggest_commit(conventional=conventional), "Commit Suggestion", tone="info", expand=False))
     except GitError as exc:
         console.print(app_panel(str(exc), "Commit Suggestion Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
@@ -643,26 +546,19 @@ def suggest_commit(conventional: bool = typer.Option(True, "--conventional/--pla
 def watch_workspace(
     interval: float = typer.Option(1.0, "--interval", help="Polling interval when watchdog is unavailable."),
 ) -> None:
-    workspace = _workspace_path()
-    console.print(app_panel(f"Watching {workspace}\nPress Ctrl+C to stop.", "Watch Mode", tone="info", expand=False))
-    WatchService(workspace, interval=interval).run()
+    actions = _actions()
+    console.print(app_panel(f"Watching {actions.workspace}\nPress Ctrl+C to stop.", "Watch Mode", tone="info", expand=False))
+    actions.watch_workspace(interval=interval)
 
 
 @app.command("inspect")
 def inspect_workspace() -> None:
-    workspace = _workspace_path()
-    findings = Inspector(workspace).run()
-    if not findings:
-        console.print(app_panel("No issues found.", "DevAgent Insights", tone="success", expand=False))
-        return
-    table = app_table("DevAgent Insights")
-    table.add_column("Severity")
-    table.add_column("File")
-    table.add_column("Message")
-    for finding in findings:
-        tone = "error" if finding.severity == "high" else "warning" if finding.severity == "medium" else "info" if finding.severity == "info" else "success"
-        table.add_row(status_badge(finding.severity, tone), finding.path, finding.message)
-    console.print(table)
+    findings = _actions().inspect()
+    renderable = insights_renderable(findings)
+    if findings:
+        console.print(renderable)
+    else:
+        console.print(app_panel(renderable, "DevAgent Insights", tone="success", expand=False))
 
 
 if __name__ == "__main__":
