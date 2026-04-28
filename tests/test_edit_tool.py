@@ -22,16 +22,16 @@ def test_sanitize_unified_diff_removes_markdown_fence() -> None:
 
 def test_apply_handles_unicode_diff(tmp_path: Path) -> None:
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
-    (tmp_path / "README.md").write_text("If you like this project, give it a ⭐ on GitHub!\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("Give it a star: \u2b50\n", encoding="utf-8")
 
     proposal = EditProposal(
         instruction="Add thanks",
         diff="""--- a/README.md
 +++ b/README.md
 @@ -1 +1,3 @@
- If you like this project, give it a ⭐ on GitHub!
+ Give it a star: \u2b50
 +
-+## 🙏 Thank you
++Thank you \U0001f64f
 """,
         message="Patch generated.",
     )
@@ -39,4 +39,33 @@ def test_apply_handles_unicode_diff(tmp_path: Path) -> None:
     EditAgent(tmp_path).apply(proposal)
 
     text = (tmp_path / "README.md").read_text(encoding="utf-8")
-    assert "## 🙏 Thank you" in text
+    assert "Thank you \U0001f64f" in text
+
+
+def test_apply_recounts_bad_hunk_lengths(tmp_path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "README.md").write_text(
+        "\n---\n\n## Support\nIf you like this project, give it a star on GitHub!\n",
+        encoding="utf-8",
+    )
+
+    proposal = EditProposal(
+        instruction="Add thankyou",
+        diff="""--- a/README.md
++++ b/README.md
+@@ -1,4 +1,4 @@
+ 
+ ---
+ 
+-## Support
+-If you like this project, give it a star on GitHub!
++## Support Thankyou
++If you like this project, give it a star on GitHub! Thankyou
+""",
+        message="Patch generated.",
+    )
+
+    EditAgent(tmp_path).apply(proposal)
+
+    text = (tmp_path / "README.md").read_text(encoding="utf-8")
+    assert "## Support Thankyou" in text

@@ -209,7 +209,12 @@ def edit(
     if not proposal.diff:
         raise typer.Exit(code=1)
     if yes or typer.confirm("Apply this diff?"):
-        edit_agent.apply(proposal)
+        try:
+            edit_agent.apply(proposal)
+        except RuntimeError as exc:
+            console.print(Panel(str(exc), title="Edit Failed", style="red"))
+            console.print("[yellow]No files were changed.[/yellow]")
+            raise typer.Exit(code=1) from exc
         console.print("[green]Applied change.[/green]")
     else:
         console.print("[yellow]No files changed.[/yellow]")

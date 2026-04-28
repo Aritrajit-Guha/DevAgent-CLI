@@ -57,7 +57,7 @@ class EditAgent:
         if not proposal.diff:
             raise ValueError("No diff is available to apply.")
         result = subprocess.run(
-            ["git", "apply", "--whitespace=fix", "-"],
+            ["git", "apply", "--recount", "--whitespace=fix", "-"],
             cwd=self.workspace,
             input=proposal.diff.encode("utf-8"),
             capture_output=True,
