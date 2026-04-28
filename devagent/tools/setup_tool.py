@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import which
@@ -21,10 +23,20 @@ class SetupResult:
 class DependencyCommand:
     cwd: Path
     command: list[str]
+    display_command: str
+    setup_commands: tuple[tuple[str, ...], ...] = ()
+    display_setup_commands: tuple[str, ...] = ()
+    virtualenv_dir: Path | None = None
 
-    def display(self, root: Path) -> str:
+    def scope(self, root: Path) -> str:
         relative = self.cwd.relative_to(root).as_posix() if self.cwd != root else "."
-        return f"{relative}> {' '.join(self.command)}"
+        return relative
+
+    def display_lines(self, root: Path) -> list[str]:
+        relative = self.scope(root)
+        lines = [f"{relative}> {command}" for command in self.display_setup_commands]
+        lines.append(f"{relative}> {self.display_command}")
+        return lines
 
 
 class SetupTool:
@@ -49,15 +61,36 @@ class SetupTool:
             messages.append(f"Detected project type: {', '.join(project.project_types)}.")
         dependency_commands = dependency_install_commands(destination)
         if dependency_commands:
-            suggestions = "\n".join(command.display(destination) for command in dependency_commands)
+            suggestions = "\n".join(
+                line
+                for command in dependency_commands
+                for line in command.display_lines(destination)
+            )
             messages.append(f"Suggested dependency commands:\n{suggestions}")
             if install_deps:
                 for command in dependency_commands:
+                    scope = command.scope(destination)
                     try:
+                        if command.virtualenv_dir:
+                            if command.virtualenv_dir.exists():
+                                messages.append(
+                                    f"Using existing virtual environment in "
+                                    f"{command.virtualenv_dir.relative_to(destination).as_posix()}."
+                                )
+                            else:
+                                for setup_command in command.setup_commands:
+                                    run(list(setup_command), cwd=command.cwd)
+                                messages.append(
+                                    f"Created virtual environment in "
+                                    f"{command.virtualenv_dir.relative_to(destination).as_posix()}."
+                                )
+                        elif command.setup_commands:
+                            for setup_command in command.setup_commands:
+                                run(list(setup_command), cwd=command.cwd)
                         run(command.command, cwd=command.cwd)
-                        messages.append(f"Installed dependencies in {command.display(destination).split('>')[0].strip()}.")
+                        messages.append(f"Installed dependencies in {scope}.")
                     except RuntimeError as exc:
-                        messages.append(f"Dependency install failed in {command.display(destination).split('>')[0].strip()}: {exc}")
+                        messages.append(f"Dependency install failed in {scope}: {exc}")
         if open_code:
             messages.append(open_in_vscode(destination))
         return SetupResult(path=destination, message="\n".join(messages))
@@ -131,22 +164,50 @@ def dependency_install_commands(path: Path, include_nested: bool = True, max_dep
                 continue
         command = dependency_command_for_directory(candidate)
         if command:
-            commands.append(DependencyCommand(cwd=candidate, command=command))
+            commands.append(command)
     return commands
 
 
-def dependency_command_for_directory(path: Path) -> list[str] | None:
+def dependency_command_for_directory(path: Path) -> DependencyCommand | None:
     if (path / "package.json").exists():
         if (path / "pnpm-lock.yaml").exists():
-            return ["pnpm", "install"]
+            return DependencyCommand(cwd=path, command=["pnpm", "install"], display_command="pnpm install")
         if (path / "yarn.lock").exists():
-            return ["yarn", "install"]
-        return ["npm", "install"]
+            return DependencyCommand(cwd=path, command=["yarn", "install"], display_command="yarn install")
+        return DependencyCommand(cwd=path, command=["npm", "install"], display_command="npm install")
     if (path / "requirements.txt").exists():
-        return ["python", "-m", "pip", "install", "-r", "requirements.txt"]
+        venv_dir = path / ".venv"
+        venv_python = python_venv_executable(venv_dir)
+        return DependencyCommand(
+            cwd=path,
+            command=[str(venv_python), "-m", "pip", "install", "-r", "requirements.txt"],
+            display_command=f"{python_venv_display(venv_dir)} -m pip install -r requirements.txt",
+            setup_commands=((sys.executable, "-m", "venv", ".venv"),),
+            display_setup_commands=("python -m venv .venv",),
+            virtualenv_dir=venv_dir,
+        )
     if (path / "pyproject.toml").exists():
-        return ["python", "-m", "pip", "install", "-e", "."]
+        venv_dir = path / ".venv"
+        venv_python = python_venv_executable(venv_dir)
+        return DependencyCommand(
+            cwd=path,
+            command=[str(venv_python), "-m", "pip", "install", "-e", "."],
+            display_command=f"{python_venv_display(venv_dir)} -m pip install -e .",
+            setup_commands=((sys.executable, "-m", "venv", ".venv"),),
+            display_setup_commands=("python -m venv .venv",),
+            virtualenv_dir=venv_dir,
+        )
     return None
+
+
+def python_venv_executable(venv_dir: Path) -> Path:
+    if os.name == "nt":
+        return venv_dir / "Scripts" / "python.exe"
+    return venv_dir / "bin" / "python"
+
+
+def python_venv_display(venv_dir: Path) -> str:
+    return python_venv_executable(Path(venv_dir.name)).as_posix()
 
 
 def open_in_vscode(path: Path) -> str:

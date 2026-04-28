@@ -205,7 +205,9 @@ opening VS Code.
 
 Dependency install checks the repo root and nested app folders such as
 `client/package.json` and `server/package.json`, then runs the right install
-command in each folder.
+command in each folder. For Python apps, DevAgent creates a local `.venv`
+inside that app folder first and installs into that virtual environment instead
+of the global Python interpreter.
 
 If you choose local, it lets you choose the local project folder, creates a GitHub
 repo using `gh`, adds `origin`, commits if needed, pushes, and binds the workspace.
