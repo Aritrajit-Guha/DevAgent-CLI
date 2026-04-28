@@ -135,8 +135,9 @@ class RunTool:
     def launch(self, specs: list[LaunchSpec], *, open_browser: bool = False) -> None:
         if os.name == "nt":
             for spec in specs:
+                launcher = write_windows_launcher(self.workspace, spec)
                 subprocess.Popen(
-                    ["cmd.exe", "/k", build_windows_terminal_command(spec)],
+                    ["cmd.exe", "/k", str(launcher)],
                     cwd=spec.cwd,
                     creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
                 )
@@ -312,10 +313,10 @@ def build_windows_terminal_command(spec: LaunchSpec) -> str:
     if spec.venv_dir:
         activate_script = spec.venv_dir / "Scripts" / "activate.bat"
         if spec.bootstrap_commands:
-            bootstrap = " && ".join(subprocess.list2cmdline(list(command)) for command in spec.bootstrap_commands)
+            bootstrap = " && ".join(format_windows_command(command) for command in spec.bootstrap_commands)
             steps.append(f'if not exist "{activate_script}" ({bootstrap})')
         steps.append(f'call "{activate_script}"')
-    steps.append(subprocess.list2cmdline(spec.command))
+    steps.append(format_windows_command(spec.command))
     return " && ".join(steps)
 
 
@@ -414,3 +415,41 @@ def extract_port(text: str) -> int | None:
             except ValueError:
                 return None
     return None
+
+
+def write_windows_launcher(workspace: Path, spec: LaunchSpec) -> Path:
+    launcher_dir = ConfigManager.workspace_cache_dir(workspace) / "launchers"
+    launcher_dir.mkdir(parents=True, exist_ok=True)
+    script_path = launcher_dir / f"{safe_filename(spec.name)}.cmd"
+    lines = [
+        "@echo off",
+        f"title DevAgent - {sanitize_console_title(spec.name)}",
+        f"cd /d {quote_cmd_arg(str(spec.cwd))}",
+    ]
+    if spec.venv_dir:
+        activate_script = spec.venv_dir / "Scripts" / "activate.bat"
+        if spec.bootstrap_commands:
+            lines.append(f"if not exist {quote_cmd_arg(str(activate_script))} (")
+            for command in spec.bootstrap_commands:
+                lines.append(f"  {format_windows_command(command)}")
+            lines.append(")")
+        lines.append(f"call {quote_cmd_arg(str(activate_script))}")
+    lines.append(format_windows_command(spec.command))
+    script_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return script_path
+
+
+def format_windows_command(command: list[str] | tuple[str, ...]) -> str:
+    return " ".join(quote_cmd_arg(str(part)) for part in command)
+
+
+def quote_cmd_arg(value: str) -> str:
+    escaped = value.replace('"', '""')
+    if not value or any(char in value for char in ' \t&()[]{}^=;!\'"+,`~'):
+        return f'"{escaped}"'
+    return escaped
+
+
+def safe_filename(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._")
+    return cleaned or "devagent-service"
