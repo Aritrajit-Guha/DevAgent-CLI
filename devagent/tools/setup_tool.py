@@ -6,6 +6,7 @@ from pathlib import Path
 from shutil import which
 from urllib.parse import urlparse
 
+from devagent.context.scanner import IGNORED_DIRS
 from devagent.core.project import detect_project
 from devagent.tools.git_tool import GitTool
 
@@ -14,6 +15,16 @@ from devagent.tools.git_tool import GitTool
 class SetupResult:
     path: Path
     message: str
+
+
+@dataclass(frozen=True)
+class DependencyCommand:
+    cwd: Path
+    command: list[str]
+
+    def display(self, root: Path) -> str:
+        relative = self.cwd.relative_to(root).as_posix() if self.cwd != root else "."
+        return f"{relative}> {' '.join(self.command)}"
 
 
 class SetupTool:
@@ -36,12 +47,17 @@ class SetupTool:
         project = detect_project(destination)
         if project.project_types:
             messages.append(f"Detected project type: {', '.join(project.project_types)}.")
-        dependency_command = dependency_install_command(destination)
-        if dependency_command:
-            messages.append(f"Suggested dependency command: {' '.join(dependency_command)}.")
+        dependency_commands = dependency_install_commands(destination)
+        if dependency_commands:
+            suggestions = "\n".join(command.display(destination) for command in dependency_commands)
+            messages.append(f"Suggested dependency commands:\n{suggestions}")
             if install_deps:
-                run(dependency_command, cwd=destination)
-                messages.append("Installed dependencies.")
+                for command in dependency_commands:
+                    try:
+                        run(command.command, cwd=command.cwd)
+                        messages.append(f"Installed dependencies in {command.display(destination).split('>')[0].strip()}.")
+                    except RuntimeError as exc:
+                        messages.append(f"Dependency install failed in {command.display(destination).split('>')[0].strip()}: {exc}")
         if open_code:
             messages.append(open_in_vscode(destination))
         return SetupResult(path=destination, message="\n".join(messages))
@@ -91,6 +107,35 @@ def normalize_github_clone_url(value: str) -> str:
 
 
 def dependency_install_command(path: Path) -> list[str] | None:
+    commands = dependency_install_commands(path, include_nested=False)
+    return commands[0].command if commands else None
+
+
+def dependency_install_commands(path: Path, include_nested: bool = True, max_depth: int = 3) -> list[DependencyCommand]:
+    root = path.expanduser().resolve()
+    commands: list[DependencyCommand] = []
+    candidates = [root]
+    if include_nested:
+        candidates.extend(sorted(parent for parent in root.rglob("*") if parent.is_dir()))
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate != root:
+            relative = candidate.relative_to(root)
+            if any(part in IGNORED_DIRS for part in relative.parts):
+                continue
+            if len(relative.parts) >= max_depth:
+                continue
+        command = dependency_command_for_directory(candidate)
+        if command:
+            commands.append(DependencyCommand(cwd=candidate, command=command))
+    return commands
+
+
+def dependency_command_for_directory(path: Path) -> list[str] | None:
     if (path / "package.json").exists():
         if (path / "pnpm-lock.yaml").exists():
             return ["pnpm", "install"]
