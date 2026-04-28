@@ -12,6 +12,8 @@ from devagent.context.scanner import IGNORED_DIRS
 from devagent.core.project import detect_project
 from devagent.tools.git_tool import GitTool
 
+COMMON_VENV_NAMES = (".venv", "venv", "env")
+
 
 @dataclass(frozen=True)
 class SetupResult:
@@ -176,34 +178,55 @@ def dependency_command_for_directory(path: Path) -> DependencyCommand | None:
             return DependencyCommand(cwd=path, command=["yarn", "install"], display_command="yarn install")
         return DependencyCommand(cwd=path, command=["npm", "install"], display_command="npm install")
     if (path / "requirements.txt").exists():
-        venv_dir = path / ".venv"
+        venv_dir = preferred_python_venv_dir(path)
         venv_python = python_venv_executable(venv_dir)
+        setup_commands = () if is_python_venv_dir(venv_dir) else ((sys.executable, "-m", "venv", venv_dir.name),)
+        display_setup = () if is_python_venv_dir(venv_dir) else (f"python -m venv {venv_dir.name}",)
         return DependencyCommand(
             cwd=path,
             command=[str(venv_python), "-m", "pip", "install", "-r", "requirements.txt"],
             display_command=f"{python_venv_display(venv_dir)} -m pip install -r requirements.txt",
-            setup_commands=((sys.executable, "-m", "venv", ".venv"),),
-            display_setup_commands=("python -m venv .venv",),
+            setup_commands=setup_commands,
+            display_setup_commands=display_setup,
             virtualenv_dir=venv_dir,
         )
     if (path / "pyproject.toml").exists():
-        venv_dir = path / ".venv"
+        venv_dir = preferred_python_venv_dir(path)
         venv_python = python_venv_executable(venv_dir)
+        setup_commands = () if is_python_venv_dir(venv_dir) else ((sys.executable, "-m", "venv", venv_dir.name),)
+        display_setup = () if is_python_venv_dir(venv_dir) else (f"python -m venv {venv_dir.name}",)
         return DependencyCommand(
             cwd=path,
             command=[str(venv_python), "-m", "pip", "install", "-e", "."],
             display_command=f"{python_venv_display(venv_dir)} -m pip install -e .",
-            setup_commands=((sys.executable, "-m", "venv", ".venv"),),
-            display_setup_commands=("python -m venv .venv",),
+            setup_commands=setup_commands,
+            display_setup_commands=display_setup,
             virtualenv_dir=venv_dir,
         )
     return None
+
+
+def preferred_python_venv_dir(path: Path) -> Path:
+    for name in COMMON_VENV_NAMES:
+        candidate = path / name
+        if is_python_venv_dir(candidate):
+            return candidate
+    for candidate in sorted(item for item in path.iterdir() if item.is_dir()):
+        if candidate.name in IGNORED_DIRS:
+            continue
+        if is_python_venv_dir(candidate):
+            return candidate
+    return path / ".venv"
 
 
 def python_venv_executable(venv_dir: Path) -> Path:
     if os.name == "nt":
         return venv_dir / "Scripts" / "python.exe"
     return venv_dir / "bin" / "python"
+
+
+def is_python_venv_dir(path: Path) -> bool:
+    return (path / "pyvenv.cfg").exists() or python_venv_executable(path).exists()
 
 
 def python_venv_display(venv_dir: Path) -> str:

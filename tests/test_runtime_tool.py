@@ -29,6 +29,21 @@ def test_detect_launch_specs_for_mixed_workspace(tmp_path: Path) -> None:
     assert python_spec.bootstrap_commands
 
 
+def test_detect_launch_specs_reuses_existing_named_venv(tmp_path: Path) -> None:
+    (tmp_path / "backend").mkdir()
+    (tmp_path / "backend" / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    (tmp_path / "backend" / "run.py").write_text("print('hello')\n", encoding="utf-8")
+    (tmp_path / "backend" / "venv" / "Scripts").mkdir(parents=True)
+    (tmp_path / "backend" / "venv" / "Scripts" / "python.exe").write_text("", encoding="utf-8")
+    (tmp_path / "backend" / "venv" / "pyvenv.cfg").write_text("home = C:\\Python311\n", encoding="utf-8")
+
+    specs = RunTool(tmp_path).detect_launch_specs()
+
+    python_spec = next(spec for spec in specs if spec.kind == "python")
+    assert python_spec.venv_dir == tmp_path / "backend" / "venv"
+    assert python_spec.bootstrap_commands == ()
+
+
 def test_build_windows_terminal_command_activates_venv(tmp_path: Path) -> None:
     backend = tmp_path / "backend"
     backend.mkdir()

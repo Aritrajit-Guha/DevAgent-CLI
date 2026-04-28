@@ -5,8 +5,10 @@ from devagent.tools.setup_tool import (
     SetupTool,
     dependency_install_command,
     dependency_install_commands,
+    is_python_venv_dir,
     normalize_github_clone_url,
     open_in_vscode,
+    preferred_python_venv_dir,
     python_venv_display,
     python_venv_executable,
     resolve_command,
@@ -30,6 +32,22 @@ def test_dependency_command_for_python_uses_project_venv(tmp_path: Path) -> None
     assert command is not None
     assert command[0] == str(python_venv_executable(tmp_path / ".venv"))
     assert command[1:] == ["-m", "pip", "install", "-r", "requirements.txt"]
+
+
+def test_preferred_python_venv_dir_reuses_existing_venv(tmp_path: Path) -> None:
+    (tmp_path / "requirements.txt").write_text("requests\n", encoding="utf-8")
+    (tmp_path / "venv" / "Scripts").mkdir(parents=True)
+    (tmp_path / "venv" / "Scripts" / "python.exe").write_text("", encoding="utf-8")
+    (tmp_path / "venv" / "pyvenv.cfg").write_text("home = C:\\Python311\n", encoding="utf-8")
+
+    venv_dir = preferred_python_venv_dir(tmp_path)
+    command = dependency_install_commands(tmp_path, include_nested=False)[0]
+
+    assert venv_dir == tmp_path / "venv"
+    assert is_python_venv_dir(venv_dir)
+    assert command.virtualenv_dir == venv_dir
+    assert command.setup_commands == ()
+    assert command.command[0] == str(python_venv_executable(venv_dir))
 
 
 def test_dependency_commands_find_nested_node_apps(tmp_path: Path) -> None:

@@ -14,7 +14,7 @@ from typing import Any
 
 from devagent.config.settings import ConfigManager
 from devagent.context.scanner import IGNORED_DIRS
-from devagent.tools.setup_tool import python_venv_executable
+from devagent.tools.setup_tool import is_python_venv_dir, preferred_python_venv_dir, python_venv_executable
 
 
 PYTHON_ENTRY_FILES = ("manage.py", "main.py", "app.py", "server.py", "run.py")
@@ -216,20 +216,18 @@ def detect_python_launch_spec(directory: Path, workspace: Path) -> LaunchSpec | 
 
     requirements = directory / "requirements.txt"
     pyproject = directory / "pyproject.toml"
-    venv_dir = directory / ".venv"
+    venv_dir = preferred_python_venv_dir(directory)
     bootstrap_commands: list[tuple[str, ...]] = []
     if requirements.exists():
-        bootstrap_commands = [
-            (sys.executable, "-m", "venv", ".venv"),
-            (str(python_venv_executable(venv_dir)), "-m", "pip", "install", "-r", "requirements.txt"),
-        ]
+        if not is_python_venv_dir(venv_dir):
+            bootstrap_commands.append((sys.executable, "-m", "venv", venv_dir.name))
+            bootstrap_commands.append((str(python_venv_executable(venv_dir)), "-m", "pip", "install", "-r", "requirements.txt"))
     elif pyproject.exists():
-        bootstrap_commands = [
-            (sys.executable, "-m", "venv", ".venv"),
-            (str(python_venv_executable(venv_dir)), "-m", "pip", "install", "-e", "."),
-        ]
+        if not is_python_venv_dir(venv_dir):
+            bootstrap_commands.append((sys.executable, "-m", "venv", venv_dir.name))
+            bootstrap_commands.append((str(python_venv_executable(venv_dir)), "-m", "pip", "install", "-e", "."))
     else:
-        venv_dir = venv_dir if venv_dir.exists() else None
+        venv_dir = venv_dir if is_python_venv_dir(venv_dir) else None
 
     scope = relative_scope(directory, workspace)
     label = f"{scope} python" if scope != "." else "python app"
@@ -277,21 +275,23 @@ def build_manual_launch_spec(phrase: str, cwd: Path, command_text: str) -> Launc
 
     requirements = cwd / "requirements.txt"
     pyproject = cwd / "pyproject.toml"
-    venv_dir = cwd / ".venv"
+    venv_dir = preferred_python_venv_dir(cwd)
     bootstrap_commands: list[tuple[str, ...]] = []
     if command[0].lower() in {"python", "py"} and (requirements.exists() or pyproject.exists() or venv_dir.exists()):
         if requirements.exists():
-            bootstrap_commands = [
-                (sys.executable, "-m", "venv", ".venv"),
-                (str(python_venv_executable(venv_dir)), "-m", "pip", "install", "-r", "requirements.txt"),
-            ]
+            if not is_python_venv_dir(venv_dir):
+                bootstrap_commands = [
+                    (sys.executable, "-m", "venv", venv_dir.name),
+                    (str(python_venv_executable(venv_dir)), "-m", "pip", "install", "-r", "requirements.txt"),
+                ]
         elif pyproject.exists():
-            bootstrap_commands = [
-                (sys.executable, "-m", "venv", ".venv"),
-                (str(python_venv_executable(venv_dir)), "-m", "pip", "install", "-e", "."),
-            ]
+            if not is_python_venv_dir(venv_dir):
+                bootstrap_commands = [
+                    (sys.executable, "-m", "venv", venv_dir.name),
+                    (str(python_venv_executable(venv_dir)), "-m", "pip", "install", "-e", "."),
+                ]
         else:
-            venv_dir = venv_dir if venv_dir.exists() else None
+            venv_dir = venv_dir if is_python_venv_dir(venv_dir) else None
     else:
         venv_dir = None
 
