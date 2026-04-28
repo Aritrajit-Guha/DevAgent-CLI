@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -16,6 +17,16 @@ class CodeChunk:
     end_line: int
     text: str
     embedding: list[float] | None = None
+    headings: list[str] | None = None
+    symbols: list[str] | None = None
+    imports: list[str] | None = None
+
+    def lexical_text(self) -> str:
+        metadata = []
+        metadata.extend(self.headings or [])
+        metadata.extend(self.symbols or [])
+        metadata.extend(self.imports or [])
+        return " ".join([self.path, *metadata, self.text])
 
 
 @dataclass(frozen=True)
@@ -50,6 +61,9 @@ class CodeIndexer:
                     end_line=chunk.end_line,
                     text=chunk.text,
                     embedding=embedding,
+                    headings=chunk.headings,
+                    symbols=chunk.symbols,
+                    imports=chunk.imports,
                 )
                 for chunk, embedding in zip(chunks, embeddings)
             ]
@@ -84,7 +98,57 @@ class CodeIndexer:
             end = min(len(lines), start + self.chunk_lines)
             chunk_text = "\n".join(lines[start:end]).strip()
             if chunk_text:
-                chunks.append(CodeChunk(path=relative, start_line=start + 1, end_line=end, text=chunk_text))
+                chunks.append(
+                    CodeChunk(
+                        path=relative,
+                        start_line=start + 1,
+                        end_line=end,
+                        text=chunk_text,
+                        headings=extract_headings(chunk_text),
+                        symbols=extract_symbols(chunk_text),
+                        imports=extract_imports(chunk_text),
+                    )
+                )
             if end >= len(lines):
                 break
         return chunks
+
+
+HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$", re.MULTILINE)
+IMPORT_RE = re.compile(r"^\s*(?:from\s+[\w.]+\s+import\s+.+|import\s+[\w., ]+|const\s+\w+\s*=\s*require\(.+?\))", re.MULTILINE)
+SYMBOL_PATTERNS = (
+    re.compile(r"^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE),
+    re.compile(r"^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE),
+    re.compile(r"^\s*(?:export\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE),
+    re.compile(r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=", re.MULTILINE),
+)
+
+
+def extract_headings(text: str, limit: int = 4) -> list[str]:
+    return unique_limited((match.group(1).strip() for match in HEADING_RE.finditer(text)), limit=limit)
+
+
+def extract_imports(text: str, limit: int = 6) -> list[str]:
+    imports = []
+    for match in IMPORT_RE.finditer(text):
+        imports.append(" ".join(match.group(0).split()))
+    return unique_limited(imports, limit=limit)
+
+
+def extract_symbols(text: str, limit: int = 8) -> list[str]:
+    symbols: list[str] = []
+    for pattern in SYMBOL_PATTERNS:
+        for match in pattern.finditer(text):
+            symbols.append(match.group(1))
+    return unique_limited(symbols, limit=limit)
+
+
+def unique_limited(values, *, limit: int) -> list[str]:
+    seen: list[str] = []
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.append(value)
+        if len(seen) >= limit:
+            break
+    return seen

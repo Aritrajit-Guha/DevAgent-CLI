@@ -13,6 +13,7 @@ from devagent.context.indexer import CodeIndexer
 from devagent.context.retriever import Retriever
 from devagent.core.agent import RepoAgent
 from devagent.core.project import detect_project
+from devagent.core.shell import AgentShell, interactive_terminal
 from devagent.tools.edit_tool import EditAgent
 from devagent.tools.git_tool import GitError, GitTool
 from devagent.tools.insights import Inspector
@@ -21,7 +22,7 @@ from devagent.tools.runtime_tool import RunTool
 from devagent.tools.setup_tool import SetupTool
 from devagent.watcher.file_watcher import WatchService
 
-app = typer.Typer(help="Local-first agentic AI developer assistant.")
+app = typer.Typer(help="Local-first agentic AI developer assistant.", invoke_without_command=True, no_args_is_help=False)
 workspace_app = typer.Typer(help="Bind and inspect the active workspace.")
 setup_app = typer.Typer(help="Clone projects or publish local projects to GitHub.")
 new_app = typer.Typer(help="Guided onboarding flows for new or existing projects.")
@@ -41,6 +42,40 @@ app.add_typer(commit_app, name="commit")
 git_app.add_typer(branch_app, name="branch")
 git_app.add_typer(pr_app, name="pr")
 git_app.add_typer(merge_app, name="merge")
+
+
+@app.callback()
+def app_callback(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is not None:
+        return
+    if interactive_terminal():
+        config = ConfigManager.load()
+        if not config.workspace_path:
+            console.print(app_panel("No workspace is bound yet.\nRun `devagent workspace bind <path>` or `devagent new project` first.", "Agent Shell", tone="warning", expand=False))
+            console.print(ctx.get_help())
+            raise typer.Exit()
+        shell = AgentShell(config.workspace_path)
+        console.print(hero_panel("Agent Shell", "Talk to DevAgent naturally, trigger saved phrases, and drive the repo from one prompt."))
+        console.print(app_panel(shell.welcome_message(), "Workspace Linked", tone="info", expand=False))
+        while True:
+            try:
+                prompt_text = "[bold bright_cyan]devagent[/bold bright_cyan] [bright_black]>[/bright_black] "
+                user_input = console.input(prompt_text)
+            except (EOFError, KeyboardInterrupt):
+                console.print()
+                raise typer.Exit()
+            try:
+                result = shell.handle_input(user_input)
+            except RuntimeError as exc:
+                console.print(app_panel(str(exc), "Shell Action Failed", tone="error", expand=False))
+                continue
+            if not result:
+                continue
+            console.print(app_panel(result.message, result.title, tone=result.tone, expand=False))
+            if result.exit_shell:
+                raise typer.Exit()
+    console.print(ctx.get_help())
+    raise typer.Exit()
 
 
 def _workspace_path(explicit: Optional[Path] = None) -> Path:
@@ -120,11 +155,11 @@ def _print_run_menu() -> None:
 
     saved_table = app_table("Saved Run Phrases")
     saved_table.add_column("Phrase")
-    saved_table.add_column("Launches")
+    saved_table.add_column("Browser")
     saved_table.add_column("Targets")
     if saved:
-        for phrase, specs in saved.items():
-            saved_table.add_row(phrase, str(len(specs)), "\n".join(spec.name for spec in specs))
+        for phrase, profile in saved.items():
+            saved_table.add_row(phrase, "yes" if profile.open_browser else "no", "\n".join(spec.name for spec in profile.specs))
     else:
         saved_table.add_row("No saved phrases yet", "-", "-")
     console.print(saved_table)
@@ -317,9 +352,13 @@ def index_workspace(path: Optional[Path] = typer.Option(None, "--path", "-p", he
 
 
 @app.command("chat")
-def chat(question: str = typer.Argument(..., help="Question about the active workspace.")) -> None:
+def chat(
+    question: str = typer.Argument(..., help="Question about the active workspace."),
+    deep: bool = typer.Option(False, "--deep", help="Use broader retrieval and the deep Gemini model when configured."),
+    new_session: bool = typer.Option(False, "--new-session", help="Clear saved workspace chat context before answering."),
+) -> None:
     workspace = _workspace_path()
-    answer = RepoAgent(workspace).answer(question)
+    answer = RepoAgent(workspace).answer(question, deep=deep, new_session=new_session)
     console.print(app_panel(answer, "DevAgent Response", tone="info"))
 
 
@@ -373,21 +412,26 @@ def run_save(
     phrase: str = typer.Argument(..., help="Natural-language phrase to remember."),
     command: Optional[str] = typer.Option(None, "--command", "-c", help="Manual command to launch instead of the detected stack."),
     cwd: Optional[Path] = typer.Option(None, "--cwd", help="Working directory for --command. Defaults to the workspace root."),
+    open_browser: bool = typer.Option(False, "--open-browser/--no-open-browser", help="Remember whether this phrase should open the browser after launch."),
+    description: Optional[str] = typer.Option(None, "--description", help="Optional note about what this phrase launches."),
 ) -> None:
     tool = _run_tool()
     try:
         if command:
-            spec = tool.save_manual_profile(phrase, command, cwd=cwd)
+            profile = tool.save_manual_profile(phrase, command, cwd=cwd, open_browser=open_browser, description=description)
+            spec = profile.specs[0]
             body = (
                 f"Saved phrase {phrase}\n\n"
                 f"Folder: {spec.scope(tool.workspace)}\n"
-                f"Command: {spec.display_command}"
+                f"Command: {spec.display_command}\n"
+                f"Open browser: {'yes' if profile.open_browser else 'no'}"
             )
         else:
-            specs = tool.save_detected_profile(phrase)
+            profile = tool.save_detected_profile(phrase, open_browser=open_browser, description=description)
             body = (
                 f"Saved phrase {phrase} for the detected stack.\n\n"
-                + "\n".join(f"- {spec.scope(tool.workspace)}: {spec.display_command}" for spec in specs)
+                + "\n".join(f"- {spec.scope(tool.workspace)}: {spec.display_command}" for spec in profile.specs)
+                + f"\n\nOpen browser: {'yes' if profile.open_browser else 'no'}"
             )
     except RuntimeError as exc:
         console.print(app_panel(str(exc), "Save Failed", tone="error", expand=False))

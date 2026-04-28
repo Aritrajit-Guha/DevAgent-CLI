@@ -67,6 +67,37 @@ class LaunchSpec:
         )
 
 
+@dataclass(frozen=True)
+class RunProfile:
+    phrase: str
+    specs: list[LaunchSpec]
+    open_browser: bool = False
+    description: str | None = None
+
+    def normalized_phrase(self) -> str:
+        return normalize_phrase(self.phrase)
+
+    def to_dict(self, workspace: Path) -> dict[str, Any]:
+        return {
+            "phrase": self.phrase,
+            "open_browser": self.open_browser,
+            "description": self.description,
+            "specs": [spec.to_dict(workspace) for spec in self.specs],
+        }
+
+    @classmethod
+    def from_dict(cls, workspace: Path, phrase: str, data: dict[str, Any] | list[dict[str, Any]]) -> "RunProfile":
+        if isinstance(data, list):
+            specs = [LaunchSpec.from_dict(workspace, item) for item in data]
+            return cls(phrase=phrase, specs=specs)
+        return cls(
+            phrase=str(data.get("phrase") or phrase),
+            specs=[LaunchSpec.from_dict(workspace, item) for item in data.get("specs", [])],
+            open_browser=bool(data.get("open_browser", False)),
+            description=str(data["description"]) if data.get("description") else None,
+        )
+
+
 class RunTool:
     def __init__(self, workspace: Path):
         self.workspace = workspace.expanduser().resolve()
@@ -89,46 +120,68 @@ class RunTool:
         self.launch(specs, open_browser=open_browser)
         return specs
 
-    def launch_saved(self, phrase: str, *, open_browser: bool = False) -> list[LaunchSpec]:
-        profiles = self.saved_profiles()
-        specs = profiles.get(phrase)
-        if not specs:
+    def launch_saved(self, phrase: str, *, open_browser: bool | None = None) -> list[LaunchSpec]:
+        profile = self.find_profile(phrase)
+        if not profile:
             raise RuntimeError(f"No saved launch phrase found: {phrase}")
-        self.launch(specs, open_browser=open_browser)
-        return specs
+        return self.launch_profile(profile, open_browser=open_browser)
 
-    def save_detected_profile(self, phrase: str) -> list[LaunchSpec]:
+    def launch_profile(self, profile: RunProfile, *, open_browser: bool | None = None) -> list[LaunchSpec]:
+        should_open_browser = profile.open_browser if open_browser is None else open_browser
+        self.launch(profile.specs, open_browser=should_open_browser)
+        return profile.specs
+
+    def save_detected_profile(self, phrase: str, *, open_browser: bool = False, description: str | None = None) -> RunProfile:
         specs = self.detect_launch_specs()
         if not specs:
             raise RuntimeError("No launchable services were detected to save.")
         profiles = self.saved_profiles()
-        profiles[phrase] = specs
+        profile = RunProfile(phrase=phrase, specs=specs, open_browser=open_browser, description=description)
+        profiles = replace_profile(profiles, profile)
         self._save_profiles(profiles)
-        return specs
+        return profile
 
-    def save_manual_profile(self, phrase: str, command_text: str, cwd: Path | None = None) -> LaunchSpec:
+    def save_manual_profile(
+        self,
+        phrase: str,
+        command_text: str,
+        cwd: Path | None = None,
+        *,
+        open_browser: bool = False,
+        description: str | None = None,
+    ) -> RunProfile:
         target_dir = (cwd or self.workspace).expanduser().resolve()
         spec = build_manual_launch_spec(phrase, target_dir, command_text)
         profiles = self.saved_profiles()
-        profiles[phrase] = [spec]
+        profile = RunProfile(phrase=phrase, specs=[spec], open_browser=open_browser, description=description)
+        profiles = replace_profile(profiles, profile)
         self._save_profiles(profiles)
-        return spec
+        return profile
 
-    def saved_profiles(self) -> dict[str, list[LaunchSpec]]:
+    def saved_profiles(self) -> dict[str, RunProfile]:
         file_path = self._profiles_file()
         if not file_path.exists():
             return {}
         raw = json.loads(file_path.read_text(encoding="utf-8"))
-        profiles: dict[str, list[LaunchSpec]] = {}
+        profiles: dict[str, RunProfile] = {}
         for phrase, items in raw.get("profiles", {}).items():
-            profiles[phrase] = [LaunchSpec.from_dict(self.workspace, item) for item in items]
+            profile = RunProfile.from_dict(self.workspace, phrase, items)
+            profiles[profile.phrase] = profile
         return profiles
+
+    def find_profile(self, phrase: str) -> RunProfile | None:
+        normalized = normalize_phrase(phrase)
+        for profile in self.saved_profiles().values():
+            if profile.normalized_phrase() == normalized:
+                return profile
+        return None
 
     def delete_profile(self, phrase: str) -> bool:
         profiles = self.saved_profiles()
-        if phrase not in profiles:
+        target_key = next((key for key, profile in profiles.items() if profile.normalized_phrase() == normalize_phrase(phrase)), None)
+        if not target_key:
             return False
-        profiles.pop(phrase)
+        profiles.pop(target_key)
         self._save_profiles(profiles)
         return True
 
@@ -154,13 +207,13 @@ class RunTool:
     def _profiles_file(self) -> Path:
         return ConfigManager.workspace_cache_dir(self.workspace) / "run_profiles.json"
 
-    def _save_profiles(self, profiles: dict[str, list[LaunchSpec]]) -> None:
+    def _save_profiles(self, profiles: dict[str, RunProfile]) -> None:
         file_path = self._profiles_file()
         file_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "profiles": {
-                phrase: [spec.to_dict(self.workspace) for spec in specs]
-                for phrase, specs in sorted(profiles.items())
+                phrase: profile.to_dict(self.workspace)
+                for phrase, profile in sorted(profiles.items())
             }
         }
         file_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -453,3 +506,14 @@ def quote_cmd_arg(value: str) -> str:
 def safe_filename(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._")
     return cleaned or "devagent-service"
+
+
+def normalize_phrase(value: str) -> str:
+    return " ".join(value.split()).casefold()
+
+
+def replace_profile(profiles: dict[str, RunProfile], profile: RunProfile) -> dict[str, RunProfile]:
+    normalized = profile.normalized_phrase()
+    updated = {key: existing for key, existing in profiles.items() if existing.normalized_phrase() != normalized}
+    updated[profile.phrase] = profile
+    return updated

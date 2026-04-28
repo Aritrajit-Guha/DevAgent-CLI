@@ -50,8 +50,8 @@ def test_build_windows_terminal_command_activates_venv(tmp_path: Path) -> None:
     (backend / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
     (backend / "main.py").write_text("print('hello')\n", encoding="utf-8")
     venv_dir = backend / ".venv"
-    spec = RunTool(tmp_path).save_manual_profile("start backend", "python main.py", cwd=backend)
-    command = build_windows_terminal_command(spec)
+    profile = RunTool(tmp_path).save_manual_profile("start backend", "python main.py", cwd=backend)
+    command = build_windows_terminal_command(profile.specs[0])
 
     assert "activate.bat" in command
     assert "python main.py" in command
@@ -66,8 +66,8 @@ def test_write_windows_launcher_uses_batch_file_for_bootstrap(tmp_path: Path, mo
     (backend / "run.py").write_text("print('hello')\n", encoding="utf-8")
 
     workspace_tool = RunTool(tmp_path)
-    spec = workspace_tool.save_manual_profile("start backend", "python run.py", cwd=backend)
-    launcher = write_windows_launcher(tmp_path, spec)
+    profile = workspace_tool.save_manual_profile("start backend", "python run.py", cwd=backend)
+    launcher = write_windows_launcher(tmp_path, profile.specs[0])
     content = launcher.read_text(encoding="utf-8")
 
     assert launcher.suffix == ".cmd"
@@ -113,14 +113,56 @@ def test_saved_profiles_round_trip(tmp_path: Path, monkeypatch) -> None:
     (workspace / "frontend" / "package.json").write_text('{"scripts": {"dev": "vite"}}', encoding="utf-8")
 
     tool = RunTool(workspace)
-    saved = tool.save_detected_profile("I order you to start in the name of jesus")
+    saved = tool.save_detected_profile("I order you to start in the name of jesus", open_browser=True)
 
     profiles = tool.saved_profiles()
 
-    assert saved
+    assert saved.specs
     assert "I order you to start in the name of jesus" in profiles
-    assert profiles["I order you to start in the name of jesus"][0].command == ["npm", "run", "dev"]
-    assert profiles["I order you to start in the name of jesus"][0].browser_url == "http://localhost:5173"
+    assert profiles["I order you to start in the name of jesus"].specs[0].command == ["npm", "run", "dev"]
+    assert profiles["I order you to start in the name of jesus"].specs[0].browser_url == "http://localhost:5173"
+    assert profiles["I order you to start in the name of jesus"].open_browser is True
 
     assert tool.delete_profile("I order you to start in the name of jesus")
     assert tool.saved_profiles() == {}
+
+
+def test_saved_profiles_match_normalized_phrase(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("DEVAGENT_CONFIG_DIR", str(tmp_path / "config-home"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "frontend").mkdir()
+    (workspace / "frontend" / "package.json").write_text('{"scripts": {"dev": "vite"}}', encoding="utf-8")
+
+    tool = RunTool(workspace)
+    tool.save_detected_profile("Start   I Command You", open_browser=True)
+
+    profile = tool.find_profile("  start i command you ")
+
+    assert profile is not None
+    assert profile.phrase == "Start   I Command You"
+    assert profile.open_browser is True
+
+
+def test_launch_saved_uses_profile_browser_preference(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("DEVAGENT_CONFIG_DIR", str(tmp_path / "config-home"))
+    monkeypatch.setattr(runtime_tool_module.os, "name", "nt")
+    opened_urls: list[str] = []
+
+    class DummyProcess:
+        pass
+
+    monkeypatch.setattr(runtime_tool_module.subprocess, "Popen", lambda *args, **kwargs: DummyProcess())
+    monkeypatch.setattr(runtime_tool_module.time, "sleep", lambda _: None)
+    monkeypatch.setattr(runtime_tool_module.webbrowser, "open", lambda url: opened_urls.append(url))
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "frontend").mkdir()
+    (workspace / "frontend" / "package.json").write_text('{"scripts": {"dev": "vite --port 4173"}}', encoding="utf-8")
+
+    tool = RunTool(workspace)
+    tool.save_detected_profile("Start the site", open_browser=True)
+    tool.launch_saved("start the site")
+
+    assert opened_urls == ["http://localhost:4173"]

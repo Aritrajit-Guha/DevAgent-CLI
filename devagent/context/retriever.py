@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
+from dataclasses import dataclass
 
 from devagent.context.indexer import CodeChunk, CodeIndex
 from devagent.tools.ai import AIClient
@@ -16,28 +17,84 @@ class Retriever:
         self.ai = AIClient.from_env()
 
     def search(self, query: str, limit: int = 5) -> list[CodeChunk]:
-        query_embedding = self.ai.embed([query])
-        if query_embedding and any(record.embedding for record in self.index.records):
-            return self._vector_search(query_embedding[0], limit)
-        return self._keyword_search(query, limit)
+        return self.search_hybrid([query], limit=limit)
 
-    def _vector_search(self, query_embedding: list[float], limit: int) -> list[CodeChunk]:
-        scored = []
+    def search_hybrid(self, queries: list[str], limit: int = 5) -> list[CodeChunk]:
+        normalized_queries = [query.strip() for query in queries if query and query.strip()]
+        if not normalized_queries:
+            return []
+
+        query_embeddings = self.ai.embed(normalized_queries)
+        has_embeddings = bool(query_embeddings and any(record.embedding for record in self.index.records))
+        hits_by_key: dict[tuple[str, int, int], SearchHit] = {}
+
+        for position, query in enumerate(normalized_queries):
+            weight = max(0.45, 1.0 - position * 0.18)
+            vector_scores = self._vector_scores(query_embeddings[position]) if has_embeddings and query_embeddings else {}
+            keyword_scores = self._keyword_scores(query)
+            for record in self.index.records:
+                key = (record.path, record.start_line, record.end_line)
+                vector_score = vector_scores.get(key, 0.0)
+                keyword_score = keyword_scores.get(key, 0.0)
+                metadata_boost = metadata_match_boost(record, query)
+                combined = (vector_score * 0.68) + (keyword_score * 0.32) + metadata_boost
+                if combined <= 0:
+                    continue
+                previous = hits_by_key.get(key)
+                scaled = combined * weight
+                if previous is None or scaled > previous.score:
+                    hits_by_key[key] = SearchHit(record=record, score=scaled)
+
+        ranked = sorted(hits_by_key.values(), key=lambda item: item.score, reverse=True)
+        return self._diverse_slice(ranked, limit)
+
+    def _vector_scores(self, query_embedding: list[float]) -> dict[tuple[str, int, int], float]:
+        scored: dict[tuple[str, int, int], float] = {}
         for record in self.index.records:
             if not record.embedding:
                 continue
-            scored.append((cosine_similarity(query_embedding, record.embedding), record))
-        return [record for _, record in sorted(scored, key=lambda item: item[0], reverse=True)[:limit]]
+            score = cosine_similarity(query_embedding, record.embedding)
+            if score > 0:
+                scored[(record.path, record.start_line, record.end_line)] = score
+        return scored
 
-    def _keyword_search(self, query: str, limit: int) -> list[CodeChunk]:
+    def _keyword_scores(self, query: str) -> dict[tuple[str, int, int], float]:
         query_tokens = tokenize(query)
-        scored = []
+        scored: dict[tuple[str, int, int], float] = {}
         for record in self.index.records:
-            text_tokens = tokenize(f"{record.path} {record.text}")
-            score = sum(text_tokens[token] * weight for token, weight in query_tokens.items())
+            text_tokens = tokenize(record.lexical_text())
+            overlap = sum(min(text_tokens[token], weight) for token, weight in query_tokens.items())
+            score = overlap / max(len(query_tokens), 1)
             if score:
-                scored.append((score, record))
-        return [record for _, record in sorted(scored, key=lambda item: item[0], reverse=True)[:limit]]
+                scored[(record.path, record.start_line, record.end_line)] = score
+        return scored
+
+    def _diverse_slice(self, ranked_hits: list["SearchHit"], limit: int) -> list[CodeChunk]:
+        selected: list[CodeChunk] = []
+        deferred: list[CodeChunk] = []
+        seen_files: set[str] = set()
+
+        for hit in ranked_hits:
+            if len(selected) >= limit:
+                break
+            if hit.record.path in seen_files:
+                deferred.append(hit.record)
+                continue
+            selected.append(hit.record)
+            seen_files.add(hit.record.path)
+
+        if len(selected) < limit:
+            for record in deferred:
+                if len(selected) >= limit:
+                    break
+                selected.append(record)
+        return selected
+
+
+@dataclass(frozen=True)
+class SearchHit:
+    record: CodeChunk
+    score: float
 
 
 def tokenize(text: str) -> Counter[str]:
@@ -60,6 +117,23 @@ def expand_token(raw: str) -> set[str]:
         if piece.endswith("ed") and len(piece) > 4:
             pieces.add(piece[:-2])
     return pieces
+
+
+def metadata_match_boost(record: CodeChunk, query: str) -> float:
+    lowered_query = query.casefold()
+    boost = 0.0
+    for value in (record.symbols or []):
+        if value.casefold() in lowered_query:
+            boost += 0.18
+    for value in (record.headings or []):
+        if value.casefold() in lowered_query:
+            boost += 0.12
+    for value in (record.imports or []):
+        if value.casefold() in lowered_query:
+            boost += 0.08
+    if record.path.casefold() in lowered_query:
+        boost += 0.22
+    return boost
 
 
 def cosine_similarity(left: list[float], right: list[float]) -> float:
