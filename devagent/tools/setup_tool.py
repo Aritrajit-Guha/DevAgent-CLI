@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from shutil import which
 from urllib.parse import urlparse
 
 from devagent.core.project import detect_project
@@ -42,8 +43,7 @@ class SetupTool:
                 run(dependency_command, cwd=destination)
                 messages.append("Installed dependencies.")
         if open_code:
-            run(["code", str(destination)], cwd=destination, check=False)
-            messages.append("Requested VS Code open.")
+            messages.append(open_in_vscode(destination))
         return SetupResult(path=destination, message="\n".join(messages))
 
     @staticmethod
@@ -104,8 +104,23 @@ def dependency_install_command(path: Path) -> list[str] | None:
     return None
 
 
+def open_in_vscode(path: Path) -> str:
+    if not which("code"):
+        return "Skipped VS Code open because the `code` command is not available in PATH."
+    result = run(["code", str(path)], cwd=path, check=False)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        return f"Requested VS Code open, but it reported an issue: {detail or 'unknown error'}."
+    return "Requested VS Code open."
+
+
 def run(args: list[str], cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(args, cwd=cwd, text=True, capture_output=True)
+    try:
+        result = subprocess.run(args, cwd=cwd, text=True, capture_output=True)
+    except FileNotFoundError as exc:
+        if check:
+            raise RuntimeError(f"Required command not found: {args[0]}") from exc
+        return subprocess.CompletedProcess(args=args, returncode=127, stdout="", stderr=f"Command not found: {args[0]}")
     if check and result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"Command failed: {' '.join(args)}")
     return result

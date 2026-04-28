@@ -89,7 +89,11 @@ def clone_repo(
     install_deps: bool = typer.Option(False, "--install-deps", help="Install detected dependencies after clone."),
     open_code: bool = typer.Option(False, "--open-code", help="Open the cloned project in VS Code."),
 ) -> None:
-    result = SetupTool.clone_from_github(repo_url, target, install_deps=install_deps, open_code=open_code)
+    try:
+        result = SetupTool.clone_from_github(repo_url, target, install_deps=install_deps, open_code=open_code)
+    except RuntimeError as exc:
+        console.print(Panel(str(exc), title="Setup Failed", style="red"))
+        raise typer.Exit(code=1) from exc
     ConfigManager.bind_workspace(result.path)
     console.print(Panel.fit(result.message, title="Clone Complete"))
     _print_project_status(result.path)
@@ -113,7 +117,11 @@ def publish_repo(
     private: bool = typer.Option(False, "--private", help="Create a private GitHub repository."),
     push: bool = typer.Option(True, "--push/--no-push", help="Push after creating the remote repository."),
 ) -> None:
-    result = SetupTool.publish_to_github(path, repo_name=repo_name, private=private, push=push)
+    try:
+        result = SetupTool.publish_to_github(path, repo_name=repo_name, private=private, push=push)
+    except (RuntimeError, ValueError) as exc:
+        console.print(Panel(str(exc), title="Publish Failed", style="red"))
+        raise typer.Exit(code=1) from exc
     ConfigManager.bind_workspace(result.path)
     console.print(Panel.fit(result.message, title="Publish Complete"))
 
