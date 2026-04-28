@@ -35,6 +35,17 @@ class GitTool:
             return []
         return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
+    def tracked_files(self) -> set[str]:
+        result = self._run(["git", "ls-files"], check=False)
+        if result.returncode != 0:
+            return set()
+        return {line.strip().replace("\\", "/") for line in result.stdout.splitlines() if line.strip()}
+
+    def is_ignored(self, relative_path: str) -> bool:
+        normalized = relative_path.replace("\\", "/")
+        result = self._run(["git", "check-ignore", "-q", normalized], check=False)
+        return result.returncode == 0
+
     def status_text(self) -> str:
         if not self.is_repo:
             return "This workspace is not a Git repository."
