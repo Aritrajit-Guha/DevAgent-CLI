@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import locale
 import re
 import subprocess
 from pathlib import Path
@@ -90,7 +91,7 @@ class GitTool:
     def diff(self, staged: bool = False) -> str:
         args = ["git", "diff", "--cached"] if staged else ["git", "diff"]
         result = self._run(args, check=False)
-        return result.stdout
+        return result.stdout or ""
 
     def conflict_files(self) -> list[str]:
         result = self._run(["git", "diff", "--name-only", "--diff-filter=U"], check=False)
@@ -160,7 +161,10 @@ class GitTool:
         return result.stdout.strip()
 
     def suggest_commit_message(self, conventional: bool = True) -> str:
-        diff = self.diff(staged=False) or self.diff(staged=True)
+        diff = self.diff(staged=False)
+        if not diff:
+            diff = self.diff(staged=True)
+        diff = diff or ""
         changed = self.changed_files()
         if not diff and not changed:
             return "chore: no changes to commit" if conventional else "No changes to commit"
@@ -177,27 +181,38 @@ class GitTool:
 
     def _run(self, args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
         try:
-            result = subprocess.run(args, cwd=self.path, text=True, capture_output=True)
+            result = subprocess.run(
+                args,
+                cwd=self.path,
+                capture_output=True,
+            )
         except FileNotFoundError as exc:
             if check:
                 raise GitError(f"Required command not found: {args[0]}") from exc
             return subprocess.CompletedProcess(args=args, returncode=127, stdout="", stderr=f"Command not found: {args[0]}")
-        if check and result.returncode != 0:
-            raise GitError(result.stderr.strip() or result.stdout.strip() or f"Command failed: {' '.join(args)}")
-        return result
+        decoded = subprocess.CompletedProcess(
+            args=result.args,
+            returncode=result.returncode,
+            stdout=decode_process_output(result.stdout),
+            stderr=decode_process_output(result.stderr),
+        )
+        if check and decoded.returncode != 0:
+            raise GitError(decoded.stderr.strip() or decoded.stdout.strip() or f"Command failed: {' '.join(args)}")
+        return decoded
 
 
 def normalize_status_path(line: str) -> str:
     return line[3:].strip() if len(line) > 3 else line.strip()
 
 
-def infer_action(changed: list[str], diff: str) -> str:
+def infer_action(changed: list[str], diff: str | None) -> str:
+    diff_text = diff or ""
     statuses = [line[:2] for line in changed]
     if any("A" in status or "??" in status for status in statuses):
         return "add"
     if any("D" in status for status in statuses):
         return "remove"
-    if re.search(r"test_|describe\(|pytest|unittest", diff, re.IGNORECASE):
+    if re.search(r"test_|describe\(|pytest|unittest", diff_text, re.IGNORECASE):
         return "update tests for"
     return "update"
 
@@ -212,14 +227,30 @@ def infer_area(files: list[str]) -> str:
     return f"{common} changes"
 
 
-def infer_conventional_prefix(files: list[str], extensions: set[str], diff: str) -> str:
+def infer_conventional_prefix(files: list[str], extensions: set[str], diff: str | None) -> str:
+    diff_text = (diff or "").lower()
     lowered = " ".join(files).lower()
     if "test" in lowered or "tests" in lowered:
         return "test"
     if ".md" in extensions or "readme" in lowered:
         return "docs"
-    if "fix" in diff.lower() or "bug" in diff.lower():
+    if "fix" in diff_text or "bug" in diff_text:
         return "fix"
-    if any(status_word in diff.lower() for status_word in ("add", "create", "new ")):
+    if any(status_word in diff_text for status_word in ("add", "create", "new ")):
         return "feat"
     return "chore"
+
+
+def decode_process_output(value: bytes | str | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+
+    preferred = locale.getpreferredencoding(False) or "utf-8"
+    for encoding in ("utf-8", preferred):
+        try:
+            return value.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return value.decode("utf-8", errors="replace")

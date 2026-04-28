@@ -121,41 +121,46 @@ def _run_git_menu() -> None:
         action = choose_menu_action(console, "Choose a Git action", git_action_choices())
         if not action or action == "exit":
             return
-        if action == "status":
-            git_status()
-        elif action == "add_all":
-            git_add(".")
-        elif action == "add_path":
-            git_add(Prompt.ask("Path to stage", default="."))
-        elif action == "branch_create":
-            create_branch(Prompt.ask("New branch name"))
-        elif action == "branch_switch":
-            switch_branch(Prompt.ask("Branch to switch to"), force=Confirm.ask("Allow switching with uncommitted changes?", default=False))
-        elif action == "commit_auto":
-            custom = Confirm.ask("Write your own commit message?", default=False)
-            message = Prompt.ask("Commit message") if custom else None
-            git_commit(message=message, all_files=True)
-        elif action == "commit_suggest":
-            suggest_commit(conventional=True)
-        elif action == "pull":
-            git_pull(remote=Prompt.ask("Remote", default="origin"), branch=None, rebase=Confirm.ask("Pull with rebase?", default=False))
-        elif action == "push":
-            git_push(remote=Prompt.ask("Remote", default="origin"), branch=None)
-        elif action == "pr_preview":
-            pr_preview(base=Prompt.ask("Base branch", default="main"))
-        elif action == "pr_create":
-            pr_create(
-                base=Prompt.ask("Base branch", default="main"),
-                title=None,
-                body=None,
-                draft=Confirm.ask("Create this PR as a draft?", default=False),
-            )
-        elif action == "merge_conflicts":
-            merge_conflicts()
-        elif action == "merge_abort":
-            merge_abort()
-        elif action == "merge_continue":
-            merge_continue()
+        try:
+            if action == "status":
+                git_status()
+            elif action == "add_all":
+                git_add(".")
+            elif action == "add_path":
+                git_add(Prompt.ask("Path to stage", default="."))
+            elif action == "branch_create":
+                create_branch(Prompt.ask("New branch name"))
+            elif action == "branch_switch":
+                switch_branch(Prompt.ask("Branch to switch to"), force=Confirm.ask("Allow switching with uncommitted changes?", default=False))
+            elif action == "commit_auto":
+                custom = Confirm.ask("Write your own commit message?", default=False)
+                message = Prompt.ask("Commit message") if custom else None
+                git_commit(message=message, all_files=True)
+            elif action == "commit_suggest":
+                suggest_commit(conventional=True)
+            elif action == "pull":
+                git_pull(remote=Prompt.ask("Remote", default="origin"), branch=None, rebase=Confirm.ask("Pull with rebase?", default=False))
+            elif action == "push":
+                git_push(remote=Prompt.ask("Remote", default="origin"), branch=None)
+            elif action == "pr_preview":
+                pr_preview(base=Prompt.ask("Base branch", default="main"))
+            elif action == "pr_create":
+                pr_create(
+                    base=Prompt.ask("Base branch", default="main"),
+                    title=None,
+                    body=None,
+                    draft=Confirm.ask("Create this PR as a draft?", default=False),
+                )
+            elif action == "merge_conflicts":
+                merge_conflicts()
+            elif action == "merge_abort":
+                merge_abort()
+            elif action == "merge_continue":
+                merge_continue()
+        except typer.Exit:
+            continue
+        except Exception as exc:
+            console.print(Panel(str(exc), title="Git Action Failed", style="red"))
 
 
 @git_app.callback()
@@ -334,7 +339,10 @@ def git_add(path: str = typer.Argument(".", help="Path to stage. Defaults to the
     except GitError as exc:
         console.print(Panel(str(exc), title="Git Add Failed", style="red"))
         raise typer.Exit(code=1) from exc
-    console.print(f"Staged [bold]{path}[/bold].")
+    if path == ".":
+        console.print("[green]Staged the whole workspace.[/green]")
+    else:
+        console.print(f"Staged [bold]{path}[/bold].")
 
 
 @branch_app.command("create")
@@ -470,7 +478,11 @@ def merge_continue() -> None:
 @commit_app.command("suggest")
 def suggest_commit(conventional: bool = typer.Option(True, "--conventional/--plain")) -> None:
     tool = _git_tool()
-    console.print(tool.suggest_commit_message(conventional=conventional))
+    try:
+        console.print(tool.suggest_commit_message(conventional=conventional))
+    except GitError as exc:
+        console.print(Panel(str(exc), title="Commit Suggestion Failed", style="red"))
+        raise typer.Exit(code=1) from exc
 
 
 @app.command("watch")

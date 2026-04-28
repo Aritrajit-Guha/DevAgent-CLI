@@ -1,6 +1,8 @@
 import subprocess
 from pathlib import Path
+from types import MethodType
 
+import devagent.tools.git_tool as git_tool_module
 from devagent.cli.main import git_action_choices
 from devagent.tools.git_tool import GitTool, infer_action, infer_area, normalize_status_path
 
@@ -37,3 +39,43 @@ def test_git_action_choices_are_descriptive() -> None:
     assert "See what changed and which branch you're on" in labels
     assert "Stage everything for the next commit" in labels
     assert "Exit Git assistant" in labels
+
+
+def test_diff_returns_empty_string_when_stdout_is_missing(tmp_path: Path) -> None:
+    tool = GitTool(tmp_path)
+
+    def fake_run(self, args, check=True):
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=None, stderr="")
+
+    tool._run = MethodType(fake_run, tool)
+
+    assert tool.diff() == ""
+
+
+def test_suggest_commit_message_handles_missing_diff(tmp_path: Path) -> None:
+    tool = GitTool(tmp_path)
+
+    def fake_diff(self, staged=False):
+        return None
+
+    def fake_changed(self):
+        return [" M devagent/app.py"]
+
+    tool.diff = MethodType(fake_diff, tool)
+    tool.changed_files = MethodType(fake_changed, tool)
+
+    assert tool.suggest_commit_message() == "chore: update devagent changes"
+
+
+def test_run_decodes_non_utf8_output_without_crashing(tmp_path: Path, monkeypatch) -> None:
+    tool = GitTool(tmp_path)
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(args=kwargs.get("args", args[0]), returncode=0, stdout=b"line \x90\n", stderr=b"")
+
+    monkeypatch.setattr(git_tool_module.subprocess, "run", fake_run)
+
+    result = tool._run(["git", "status"], check=False)
+
+    assert isinstance(result.stdout, str)
+    assert "line" in result.stdout
