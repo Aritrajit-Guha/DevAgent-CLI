@@ -48,7 +48,10 @@ class EditAgent:
         diff = self.ai.complete(prompt)
         if not diff or diff.strip() == "NO_PATCH" or "AI request failed:" in diff:
             return EditProposal(instruction=instruction, diff=None, message=diff or "No patch generated.")
-        return EditProposal(instruction=instruction, diff=diff.strip(), message="Patch generated.")
+        clean_diff = sanitize_unified_diff(diff)
+        if not clean_diff:
+            return EditProposal(instruction=instruction, diff=None, message="No valid unified diff was generated.")
+        return EditProposal(instruction=instruction, diff=clean_diff, message="Patch generated.")
 
     def apply(self, proposal: EditProposal) -> None:
         if not proposal.diff:
@@ -56,9 +59,29 @@ class EditAgent:
         result = subprocess.run(
             ["git", "apply", "--whitespace=fix", "-"],
             cwd=self.workspace,
-            text=True,
-            input=proposal.diff,
+            input=proposal.diff.encode("utf-8"),
             capture_output=True,
         )
         if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Failed to apply diff.")
+            stderr = result.stderr.decode("utf-8", errors="replace").strip()
+            stdout = result.stdout.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(stderr or stdout or "Failed to apply diff.")
+
+
+def sanitize_unified_diff(raw: str) -> str | None:
+    text = raw.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    start_markers = ("diff --git ", "--- a/", "--- /", "Index: ")
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line.startswith(start_markers):
+            cleaned = "\n".join(lines[index:]).strip()
+            return f"{cleaned}\n" if cleaned else None
+    return None
