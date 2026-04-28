@@ -150,18 +150,19 @@ def dependency_command_for_directory(path: Path) -> list[str] | None:
 
 
 def open_in_vscode(path: Path) -> str:
-    if not which("code"):
-        return "Skipped VS Code open because the `code` command is not available in PATH."
     result = run(["code", str(path)], cwd=path, check=False)
     if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip()
+        detail = (result.stderr or "").strip() or (result.stdout or "").strip()
+        if result.returncode == 127:
+            return "Skipped VS Code open because the `code` command is not available in PATH."
         return f"Requested VS Code open, but it reported an issue: {detail or 'unknown error'}."
     return "Requested VS Code open."
 
 
 def run(args: list[str], cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
+    resolved_args = resolve_command(args)
     try:
-        result = subprocess.run(args, cwd=cwd, text=True, capture_output=True)
+        result = subprocess.run(resolved_args, cwd=cwd, text=True, capture_output=True)
     except FileNotFoundError as exc:
         if check:
             raise RuntimeError(f"Required command not found: {args[0]}") from exc
@@ -169,3 +170,12 @@ def run(args: list[str], cwd: Path, check: bool = True) -> subprocess.CompletedP
     if check and result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"Command failed: {' '.join(args)}")
     return result
+
+
+def resolve_command(args: list[str]) -> list[str]:
+    if not args:
+        return args
+    resolved = which(args[0])
+    if not resolved:
+        return args
+    return [resolved, *args[1:]]

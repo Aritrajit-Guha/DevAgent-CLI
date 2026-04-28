@@ -5,6 +5,7 @@ from devagent.tools.setup_tool import (
     dependency_install_commands,
     normalize_github_clone_url,
     open_in_vscode,
+    resolve_command,
 )
 
 
@@ -40,3 +41,11 @@ def test_open_in_vscode_is_non_fatal_when_code_is_missing(monkeypatch, tmp_path:
     message = open_in_vscode(tmp_path)
 
     assert "Skipped VS Code open" in message
+
+
+def test_resolve_command_uses_full_path(monkeypatch) -> None:
+    monkeypatch.setattr("devagent.tools.setup_tool.which", lambda name: r"C:\Program Files\nodejs\npm.cmd" if name == "npm" else None)
+
+    resolved = resolve_command(["npm", "install"])
+
+    assert resolved == [r"C:\Program Files\nodejs\npm.cmd", "install"]
