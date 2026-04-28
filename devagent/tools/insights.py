@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,7 +41,26 @@ SENSITIVE_FILE_NAMES = {
     ".npmrc",
     ".yarnrc",
 }
-ENV_TEMPLATE_NAMES = {".env.example", ".env.sample", ".env.template"}
+ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template")
+DOCUMENTATION_SUFFIXES = {".md", ".mdx", ".rst", ".txt", ".adoc"}
+PLACEHOLDER_HINTS = (
+    "<",
+    ">",
+    "example",
+    "sample",
+    "placeholder",
+    "replace",
+    "your_",
+    "your-",
+    "username",
+    "password",
+    "dbname",
+    "cluster-url",
+    "cluster_name",
+    "localhost",
+    "127.0.0.1",
+)
+STRONG_PLACEHOLDER_HINTS = ("<", ">", "your_", "your-", "username", "password", "dbname", "cluster-url", "cluster_name")
 
 SENSITIVE_FILE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".crt", ".cer", ".p8"}
 BINARY_SUFFIXES = {
@@ -82,7 +100,8 @@ class Inspector:
 
     def run(self) -> list[Finding]:
         findings: list[Finding] = []
-        if not (self.workspace / ".env.example").exists():
+        security_files = list(iter_security_files(self.workspace))
+        if not any(is_env_template_file(path.relative_to(self.workspace).as_posix()) for path in security_files):
             findings.append(Finding("medium", ".env.example", "Missing .env.example for documenting required secrets."))
 
         git = GitTool(self.workspace)
@@ -90,44 +109,37 @@ class Inspector:
         if git.is_repo and git.has_changes():
             findings.append(Finding("info", ".", "Working tree has uncommitted changes."))
 
-        for path in iter_security_files(self.workspace):
+        for path in security_files:
             relative = path.relative_to(self.workspace).as_posix()
-            findings.extend(sensitive_file_findings(relative, tracked=relative in tracked_files, ignored=git.is_ignored(relative) if git.is_repo else False))
+            tracked = relative in tracked_files if git.is_repo else False
+            ignored = git.is_ignored(relative) if git.is_repo else False
+            findings.extend(sensitive_file_findings(relative, tracked=tracked, ignored=ignored))
             if path.stat().st_size > 500_000:
                 findings.append(Finding("low", relative, "Large file may slow indexing."))
                 continue
             text = read_text_safely(path)
             if not text:
                 continue
-            findings.extend(secret_findings(relative, text))
-            if path.suffix == ".py":
-                findings.extend(python_function_findings(relative, text))
+            findings.extend(secret_findings(relative, text, tracked=tracked, ignored=ignored))
         return sort_findings(findings)
 
 
-def secret_findings(relative: str, text: str) -> list[Finding]:
+def secret_findings(relative: str, text: str, *, tracked: bool = False, ignored: bool = False) -> list[Finding]:
+    if should_skip_secret_scanning(relative, tracked=tracked, ignored=ignored):
+        return []
     findings: list[Finding] = []
     for line_number, line in enumerate(text.splitlines(), start=1):
         if "devagent: ignore-secret" in line:
             continue
         for message, severity, pattern in SECRET_RULES:
-            if pattern.search(line):
+            match = pattern.search(line)
+            if not match:
+                continue
+            if is_false_positive_secret_match(relative, line, match.group(0), message):
+                continue
+            if match:
                 findings.append(Finding(severity, f"{relative}:{line_number}", message))
                 break
-    return findings
-
-
-def python_function_findings(relative: str, text: str, max_lines: int = 100) -> list[Finding]:
-    findings: list[Finding] = []
-    try:
-        tree = ast.parse(text)
-    except SyntaxError:
-        return findings
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and hasattr(node, "end_lineno"):
-            length = int(node.end_lineno or node.lineno) - node.lineno + 1
-            if length > max_lines:
-                findings.append(Finding("low", f"{relative}:{node.lineno}", f"Large function `{node.name}` has {length} lines."))
     return findings
 
 
@@ -144,9 +156,42 @@ def sensitive_file_findings(relative: str, tracked: bool, ignored: bool) -> list
 def is_sensitive_file(relative: str) -> bool:
     path = Path(relative)
     name = path.name.lower()
-    if name in ENV_TEMPLATE_NAMES:
+    if is_env_template_name(name):
         return False
     return name in SENSITIVE_FILE_NAMES or name.startswith(".env.") or path.suffix.lower() in SENSITIVE_FILE_SUFFIXES
+
+
+def is_env_template_name(name: str) -> bool:
+    lowered = name.lower()
+    return lowered.startswith(".env") and lowered.endswith(ENV_TEMPLATE_SUFFIXES)
+
+
+def is_env_template_file(relative: str) -> bool:
+    return is_env_template_name(Path(relative).name)
+
+
+def should_skip_secret_scanning(relative: str, *, tracked: bool, ignored: bool) -> bool:
+    name = Path(relative).name.lower()
+    if is_env_template_name(name):
+        return True
+    if name.startswith(".env") and ignored and not tracked:
+        return True
+    return False
+
+
+def is_false_positive_secret_match(relative: str, line: str, matched: str, message: str) -> bool:
+    if message == "Mongo connection string exposed":
+        return looks_like_example_secret(relative, line, matched)
+    return False
+
+
+def looks_like_example_secret(relative: str, line: str, matched: str) -> bool:
+    suffix = Path(relative).suffix.lower()
+    lower_line = line.lower()
+    lower_match = matched.lower()
+    if suffix in DOCUMENTATION_SUFFIXES and any(hint in lower_line for hint in PLACEHOLDER_HINTS):
+        return True
+    return any(hint in lower_match for hint in STRONG_PLACEHOLDER_HINTS)
 
 
 def iter_security_files(root: Path):
