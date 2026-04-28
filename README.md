@@ -72,6 +72,8 @@ The intended development flow is one branch per feature, then merge into `main`:
   summaries so demos remain usable offline.
 - Controlled edits always show a diff and require explicit confirmation before
   applying changes.
+- The current MVP uses a lightweight JSON index, so installs stay fast and do
+  not require a local vector database.
 
 ## Local Testing Guide
 
