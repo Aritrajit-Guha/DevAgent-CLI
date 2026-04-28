@@ -598,6 +598,9 @@ class AgentShell:
         if action == "pr_create":
             preview, options = self.pr_preview_with_prompts(return_options=True)
             console.print(pr_preview_renderable(preview))
+            if not preview.ready_to_create:
+                guidance = "\n".join(f"- {line}" for line in preview.readiness) or "This branch needs another commit or push before opening a PR."
+                return ShellResult("Pull Request Not Ready", guidance, "warning")
             if not Confirm.ask("Create this pull request now?", default=True):
                 return ShellResult("Pull Request", "Cancelled PR creation.", "warning")
             url = self.actions.pr_create(
@@ -658,10 +661,20 @@ class AgentShell:
     def pull_with_prompts(self) -> PullOutcome:
         snapshot = self.actions.workspace_status()
         current_branch = snapshot.branch or "current branch"
-        tracked = self.actions.git_upstream_for()
+        tracked_target = self.actions.git_tracked_remote_target(current_branch)
+        raw_upstream = self.actions.git_upstream_for(current_branch)
         remotes = self.actions.git_remotes()
-        if tracked and "/" in tracked:
-            remote, branch = tracked.split("/", 1)
+        if raw_upstream and tracked_target is None:
+            console.print(
+                app_panel(
+                    f"The tracked upstream `{raw_upstream}` does not look usable, so DevAgent will ignore it for this pull.",
+                    "Pull Guidance",
+                    tone="warning",
+                    expand=False,
+                )
+            )
+        if tracked_target:
+            remote, branch = tracked_target
         else:
             remote = remotes[0].name if len(remotes) == 1 else self.choose_named_value(
                 "Choose the remote to pull from",
@@ -680,7 +693,7 @@ class AgentShell:
             remote=remote,
             remote_branch=branch,
         )
-        if not tracked:
+        if not tracked_target:
             console.print(git_remotes_renderable(remotes))
         console.print(git_pull_summary_renderable(summary))
         if not Confirm.ask("Run this pull now?", default=True):
@@ -691,9 +704,19 @@ class AgentShell:
         snapshot = self.actions.workspace_status()
         current_branch = snapshot.branch or "current branch"
         remotes = self.actions.git_remotes()
-        upstream = self.actions.git_upstream_for(current_branch)
-        if upstream and "/" in upstream:
-            remote, remote_branch = upstream.split("/", 1)
+        tracked_target = self.actions.git_tracked_remote_target(current_branch)
+        raw_upstream = self.actions.git_upstream_for(current_branch)
+        if raw_upstream and tracked_target is None:
+            console.print(
+                app_panel(
+                    f"The tracked upstream `{raw_upstream}` does not look usable, so DevAgent will publish `{current_branch}` with a clean target.",
+                    "Push Guidance",
+                    tone="warning",
+                    expand=False,
+                )
+            )
+        if tracked_target:
+            remote, remote_branch = tracked_target
             set_upstream = False
         else:
             remote = remotes[0].name if len(remotes) == 1 else self.choose_named_value(
@@ -709,7 +732,7 @@ class AgentShell:
             remote_branch=remote_branch,
             set_upstream=set_upstream,
         )
-        if upstream is None:
+        if tracked_target is None:
             console.print(git_remotes_renderable(remotes))
         console.print(git_push_summary_renderable(summary))
         if not Confirm.ask("Run this push now?", default=True):

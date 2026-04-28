@@ -136,6 +136,8 @@ def commit_suggestion_renderable(suggestion: CommitSuggestion) -> RenderableType
     table.add_row("Subject", suggestion.subject)
     table.add_row("Project area", suggestion.project_area or "none")
     table.add_row("Key files", "\n".join(suggestion.changed_files[:5]) or "none")
+    if suggestion.impact_summary:
+        table.add_row("Impact", "\n".join(f"- {line}" for line in suggestion.impact_summary))
     bullets = suggestion.body_bullets or suggestion.change_summary or suggestion.impact_summary
     table.add_row("Preview", "\n".join(f"- {line}" for line in bullets) or "none")
     return table
@@ -166,6 +168,9 @@ def pr_preview_renderable(preview: PullRequestPreview) -> RenderableType:
     table.add_column("Value")
     if getattr(preview, "summary", None):
         table.add_row("Plan", preview.summary)
+    table.add_row("Ready now", "yes" if getattr(preview, "ready_to_create", True) else "not yet")
+    if getattr(preview, "readiness", None):
+        table.add_row("Readiness", "\n".join(f"- {line}" for line in preview.readiness))
     table.add_row("Title", preview.title)
     table.add_row("Body", preview.body)
     return table

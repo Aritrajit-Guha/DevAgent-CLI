@@ -19,9 +19,12 @@ COMMON_PATH_TOKENS = {
     "devagent",
     "file",
     "files",
+    "index",
     "main",
     "module",
+    "page",
     "project",
+    "readme",
     "service",
     "services",
     "src",
@@ -131,6 +134,28 @@ class PushResult:
 
 
 @dataclass(frozen=True)
+class BranchReadiness:
+    current_branch: str
+    base_branch: str
+    upstream: str | None
+    publish_remote: str | None
+    publish_branch: str | None
+    valid_upstream: bool
+    ahead: int = 0
+    behind: int = 0
+    has_staged_changes: bool = False
+    has_unstaged_changes: bool = False
+    commits_ahead_of_base: int = 0
+    head_branch_published: bool = False
+    blocking_reasons: tuple[str, ...] = ()
+    notes: tuple[str, ...] = ()
+
+    @property
+    def can_create_pr(self) -> bool:
+        return not self.blocking_reasons
+
+
+@dataclass(frozen=True)
 class PullRequestOptions:
     base_repo: str | None
     base_branch: str
@@ -149,6 +174,7 @@ class ChangeAnalysis:
     statuses: tuple[str, ...]
     symbols: tuple[str, ...]
     focus_topics: tuple[str, ...]
+    surface_labels: tuple[str, ...]
     key_files: tuple[str, ...]
     prefix: str
     action: str
@@ -228,6 +254,13 @@ class GitTool:
                 branches.append(value)
         return branches
 
+    def remote_exists(self, remote: str) -> bool:
+        return any(item.name == remote for item in self.remotes())
+
+    def remote_tracking_ref_exists(self, remote: str, branch: str) -> bool:
+        result = self._run(["git", "show-ref", "--verify", f"refs/remotes/{remote}/{branch}"], check=False)
+        return result.returncode == 0
+
     def upstream_for(self, branch: str | None = None) -> str | None:
         target = branch or self.current_branch()
         if not target:
@@ -235,6 +268,52 @@ class GitTool:
         result = self._run(["git", "rev-parse", "--abbrev-ref", f"{target}@{{upstream}}"], check=False)
         upstream = result.stdout.strip()
         return upstream or None
+
+    def status_entries(self) -> list[tuple[str, str, str]]:
+        entries: list[tuple[str, str, str]] = []
+        for line in self.changed_files():
+            if len(line) < 3:
+                continue
+            index_status = line[:1]
+            worktree_status = line[1:2]
+            entries.append((index_status, worktree_status, normalize_status_path(line)))
+        return entries
+
+    def has_staged_changes(self) -> bool:
+        return any(index not in {" ", "?"} for index, _, _ in self.status_entries())
+
+    def has_unstaged_changes(self) -> bool:
+        return any(worktree != " " for _, worktree, _ in self.status_entries())
+
+    def compare_to_upstream(self, branch: str | None = None) -> tuple[int, int]:
+        target = branch or self.current_branch()
+        tracked = self.tracked_remote_target(target)
+        if not target or not tracked:
+            return 0, 0
+        remote, remote_branch = tracked
+        result = self._run(["git", "rev-list", "--left-right", "--count", f"{target}...{remote}/{remote_branch}"], check=False)
+        if result.returncode != 0:
+            return 0, 0
+        counts = result.stdout.split()
+        if len(counts) != 2:
+            return 0, 0
+        try:
+            return int(counts[0]), int(counts[1])
+        except ValueError:
+            return 0, 0
+
+    def resolve_base_ref(self, base_branch: str, remote: str | None = None) -> str | None:
+        candidates = [base_branch]
+        if remote:
+            candidates.append(f"{remote}/{base_branch}")
+        default_remote = self.default_remote_name()
+        if default_remote and default_remote != remote:
+            candidates.append(f"{default_remote}/{base_branch}")
+        for candidate in unique_limited(candidates, len(candidates)):
+            result = self._run(["git", "rev-parse", "--verify", candidate], check=False)
+            if result.returncode == 0:
+                return candidate
+        return None
 
     def merge_in_progress(self) -> bool:
         result = self._run(["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"], check=False)
@@ -386,7 +465,83 @@ class GitTool:
         remote, remote_branch = upstream.split("/", 1)
         if not remote or not remote_branch:
             return None
+        if not self.remote_exists(remote):
+            return None
+        if not self.remote_tracking_ref_exists(remote, remote_branch):
+            return None
         return remote, remote_branch
+
+    def resolve_push_target(self, branch: str | None = None) -> tuple[str | None, str | None, bool]:
+        current = branch or self.current_branch()
+        tracked = self.tracked_remote_target(current)
+        if tracked:
+            return tracked[0], tracked[1], False
+        return self.default_remote_name(), current, True
+
+    def commit_count_since(self, base_branch: str = "main", *, remote: str | None = None) -> int:
+        base_ref = self.resolve_base_ref(base_branch, remote=remote)
+        if not base_ref:
+            return 0
+        result = self._run(["git", "rev-list", "--count", f"{base_ref}..HEAD"], check=False)
+        if result.returncode != 0:
+            return 0
+        try:
+            return int(result.stdout.strip() or "0")
+        except ValueError:
+            return 0
+
+    def pr_readiness(self, *, base_branch: str = "main", head_branch: str | None = None) -> BranchReadiness:
+        current = head_branch or self.current_branch() or ""
+        upstream = self.upstream_for(current) if current else None
+        tracked = self.tracked_remote_target(current)
+        publish_remote, publish_branch, _ = self.resolve_push_target(current)
+        ahead, behind = self.compare_to_upstream(current) if tracked else (0, 0)
+        has_staged = self.has_staged_changes()
+        has_unstaged = self.has_unstaged_changes()
+        commits_ahead = self.commit_count_since(base_branch)
+        head_branch_published = bool(
+            publish_remote
+            and publish_branch
+            and self.remote_tracking_ref_exists(publish_remote, publish_branch)
+        )
+
+        blocking: list[str] = []
+        notes: list[str] = []
+        if not current:
+            blocking.append("DevAgent could not determine the current branch.")
+        if upstream and tracked is None:
+            notes.append(
+                f"The tracked upstream `{upstream}` looks unusable, so DevAgent will ignore it for guided push and PR flows."
+            )
+        if has_staged or has_unstaged:
+            blocking.append("You still have local changes that are not committed on this branch.")
+        if commits_ahead <= 0 and current:
+            blocking.append(f"`{current}` does not have any commits ahead of `{base_branch}` yet.")
+        if not publish_remote:
+            blocking.append("No Git remote is configured for this repository.")
+        elif not head_branch_published and publish_branch:
+            blocking.append(f"Push `{publish_branch}` to `{publish_remote}` before opening a pull request.")
+        if tracked and behind > 0:
+            notes.append(f"This branch is behind `{tracked[0]}/{tracked[1]}` by {behind} commit(s).")
+        if tracked and ahead > 0:
+            notes.append(f"This branch is ahead of `{tracked[0]}/{tracked[1]}` by {ahead} commit(s).")
+
+        return BranchReadiness(
+            current_branch=current or "current branch",
+            base_branch=base_branch,
+            upstream=upstream,
+            publish_remote=publish_remote,
+            publish_branch=publish_branch,
+            valid_upstream=tracked is not None,
+            ahead=ahead,
+            behind=behind,
+            has_staged_changes=has_staged,
+            has_unstaged_changes=has_unstaged,
+            commits_ahead_of_base=commits_ahead,
+            head_branch_published=head_branch_published,
+            blocking_reasons=tuple(blocking),
+            notes=tuple(notes),
+        )
 
     def default_remote_name(self) -> str | None:
         remotes = self.remotes()
@@ -479,6 +634,13 @@ class GitTool:
         body: str | None = None,
         draft: bool = False,
     ) -> str:
+        readiness = self.pr_readiness(base_branch=base_branch, head_branch=head_branch)
+        if not readiness.can_create_pr:
+            reason_block = "\n".join(f"- {reason}" for reason in readiness.blocking_reasons)
+            raise GitError(
+                "This branch is not ready for a pull request yet:\n"
+                f"{reason_block}"
+            )
         options = PullRequestOptions(
             base_repo=base_repo or self.default_base_repo(),
             base_branch=base_branch,
@@ -501,13 +663,19 @@ class GitTool:
         return result.stdout.strip()
 
     def changed_files_since(self, base: str = "main") -> list[str]:
-        result = self._run(["git", "diff", "--name-only", f"{base}...HEAD"], check=False)
+        base_ref = self.resolve_base_ref(base)
+        if not base_ref:
+            return []
+        result = self._run(["git", "diff", "--name-only", f"{base_ref}...HEAD"], check=False)
         if result.returncode != 0:
             return []
         return [line.strip().replace("\\", "/") for line in result.stdout.splitlines() if line.strip()]
 
     def diff_stat_since(self, base: str = "main") -> str:
-        result = self._run(["git", "diff", "--stat", f"{base}...HEAD"], check=False)
+        base_ref = self.resolve_base_ref(base)
+        if not base_ref:
+            return ""
+        result = self._run(["git", "diff", "--stat", f"{base_ref}...HEAD"], check=False)
         if result.returncode != 0:
             return ""
         return result.stdout.strip()
@@ -515,7 +683,7 @@ class GitTool:
     def suggest_commit(self, conventional: bool = True) -> CommitSuggestion:
         diff = self.diff(staged=False)
         staged_diff = self.diff(staged=True)
-        working_diff = diff or staged_diff or ""
+        working_diff = staged_diff or diff or ""
         changed = self.changed_files()
         if not working_diff and not changed:
             subject = "chore: no changes to commit" if conventional else "No changes to commit"
@@ -639,11 +807,12 @@ def analyze_changes(changed: list[str], diff: str, staged_diff: str = "") -> Cha
     prefix = infer_conventional_prefix(list(files), extensions, diff)
     symbols = extract_symbols(diff or staged_diff)
     focus_topics = derive_focus_topics(files, diff, symbols)
+    surface_labels = extract_surface_labels(files, diff or staged_diff)
     key_files = select_key_files(files)
-    project_area = derive_project_area(files, focus_topics, symbols, diff)
-    change_summary = build_change_summary(files, focus_topics, symbols, project_area)
-    impact_summary = build_impact_summary(project_area, focus_topics, files)
-    body_bullets = build_body_bullets(change_summary, impact_summary, select_key_files(primary_source_files(files)))
+    project_area = derive_project_area(files, focus_topics, symbols, diff, surface_labels)
+    change_summary = build_change_summary(files, focus_topics, symbols, project_area, surface_labels)
+    impact_summary = build_impact_summary(project_area, focus_topics, files, surface_labels)
+    body_bullets = build_body_bullets(change_summary, impact_summary, key_files)
     return ChangeAnalysis(
         files=files,
         diff=diff,
@@ -651,6 +820,7 @@ def analyze_changes(changed: list[str], diff: str, staged_diff: str = "") -> Cha
         statuses=statuses,
         symbols=symbols,
         focus_topics=focus_topics,
+        surface_labels=surface_labels,
         key_files=key_files,
         prefix=prefix,
         action=action,
@@ -679,7 +849,9 @@ def build_deterministic_commit_suggestion(analysis: ChangeAnalysis, *, conventio
 def build_subject_line(analysis: ChangeAnalysis, *, conventional: bool) -> str:
     action = analysis.action
     scope = analysis.project_area
-    if action == "document":
+    if should_adjust_wording(analysis):
+        phrase = f"adjust {scope}"
+    elif action == "document":
         phrase = f"document {scope}"
     elif action == "cover":
         phrase = f"cover {scope}"
@@ -730,7 +902,32 @@ def derive_focus_topics(files: tuple[str, ...], diff: str, symbols: tuple[str, .
     return tuple(unique_limited(matched_topics, 2)) or ("project changes",)
 
 
-def derive_project_area(files: tuple[str, ...], focus_topics: tuple[str, ...], symbols: tuple[str, ...], diff: str) -> str:
+def extract_surface_labels(files: tuple[str, ...], diff: str) -> tuple[str, ...]:
+    labels: list[str] = []
+    if re.search(r"^[+-].*<title>.*</title>", diff, re.MULTILINE | re.IGNORECASE):
+        labels.append("page title")
+    if re.search(r"^[+-]\s*#+\s+", diff, re.MULTILINE):
+        if any(Path(file).stem.casefold() == "readme" for file in files):
+            labels.append("README wording")
+        else:
+            labels.append("documentation headings")
+    if any(is_ui_text_path(file) for file in files):
+        if re.search(r"^[+-].*(?:<h[1-6][^>]*>|<p[^>]*>|<button[^>]*>|<span[^>]*>|<li[^>]*>)", diff, re.MULTILINE | re.IGNORECASE):
+            labels.append("page copy")
+        elif re.search(r"^[+-]\s*(?:title:|subtitle:|label:|text:|description:)", diff, re.MULTILINE | re.IGNORECASE):
+            labels.append("page copy")
+    if not labels and any(is_docs_path(file) for file in files) and any(is_ui_text_path(file) for file in files):
+        labels.append("page and README wording")
+    return tuple(unique_limited(labels, 2))
+
+
+def derive_project_area(
+    files: tuple[str, ...],
+    focus_topics: tuple[str, ...],
+    symbols: tuple[str, ...],
+    diff: str,
+    surface_labels: tuple[str, ...],
+) -> str:
     if not files:
         return "project changes"
     primary_files = primary_source_files(files)
@@ -738,15 +935,22 @@ def derive_project_area(files: tuple[str, ...], focus_topics: tuple[str, ...], s
         return derive_docs_area(files)
     if files and all(is_test_path(file) for file in files):
         return derive_test_area(files)
+    if surface_labels and any(is_docs_path(file) for file in files) and any(is_ui_text_path(file) for file in files):
+        return join_human_list(list(surface_labels[:2]))
     git_area = derive_git_area(primary_files, symbols, diff)
     if git_area:
         return git_area
+    if surface_labels:
+        return join_human_list(list(surface_labels[:2]))
     symbol_area = derive_symbol_area(symbols)
     if symbol_area:
         return symbol_area
     path_context = derive_path_context(primary_files)
     if path_context:
         return path_context
+    file_context = derive_file_context(primary_files)
+    if file_context:
+        return file_context
     recognized = [TOPIC_SCOPE_LABELS[topic] for topic in focus_topics if topic in TOPIC_SCOPE_LABELS]
     if len(recognized) >= 2:
         return f"{recognized[0]} and {recognized[1]}"
@@ -757,30 +961,54 @@ def derive_project_area(files: tuple[str, ...], focus_topics: tuple[str, ...], s
     return "project changes"
 
 
-def build_change_summary(files: tuple[str, ...], focus_topics: tuple[str, ...], symbols: tuple[str, ...], project_area: str) -> tuple[str, ...]:
+def build_change_summary(
+    files: tuple[str, ...],
+    focus_topics: tuple[str, ...],
+    symbols: tuple[str, ...],
+    project_area: str,
+    surface_labels: tuple[str, ...],
+) -> tuple[str, ...]:
     summaries: list[str] = []
-    primary_files = select_key_files(primary_source_files(files))
-    if primary_files:
+    primary_files = select_key_files(files)
+    doc_files = [file for file in files if is_docs_path(file)]
+    ui_files = [file for file in files if is_ui_text_path(file)]
+    if surface_labels and doc_files and ui_files:
+        ui_file = ui_files[0]
+        doc_file = doc_files[0]
+        if "page title" in surface_labels:
+            summaries.append(f"Refreshes the page title in `{ui_file}` and matching wording in `{doc_file}`.")
+        elif "page copy" in surface_labels:
+            summaries.append(f"Refreshes on-page copy in `{ui_file}` and keeps `{doc_file}` aligned.")
+        else:
+            summaries.append(f"Keeps `{ui_file}` and `{doc_file}` in sync.")
+    elif primary_files:
         if len(primary_files) == 1:
             summaries.append(f"Updates `{primary_files[0]}`.")
         else:
-            summaries.append(
-                f"Updates {', '.join(f'`{file}`' for file in primary_files[:3])} and related files."
-            )
+            summaries.append(f"Updates {', '.join(f'`{file}`' for file in primary_files[:3])}.")
     if project_area:
         summaries.append(f"Focuses on {project_area}.")
     if symbols:
         summaries.append(f"Touches {', '.join(f'`{symbol}`' for symbol in symbols[:4])}.")
-    elif focus_topics:
+    elif surface_labels:
+        summaries.append(f"Centers the work on {join_human_list(list(surface_labels[:2])).casefold()}.")
+    elif focus_topics and focus_topics != ("project changes",):
         summaries.append(f"Centers the work on {', '.join(topic.casefold() for topic in focus_topics[:2])}.")
     return tuple(unique_limited(summaries, 3))
 
 
-def build_impact_summary(project_area: str, focus_topics: tuple[str, ...], files: tuple[str, ...]) -> tuple[str, ...]:
+def build_impact_summary(
+    project_area: str,
+    focus_topics: tuple[str, ...],
+    files: tuple[str, ...],
+    surface_labels: tuple[str, ...],
+) -> tuple[str, ...]:
     impacts: list[str] = []
     lowered_area = project_area.casefold()
     if "coverage" in lowered_area or "test coverage" in focus_topics:
         impacts.append("Adds stronger regression protection for the updated behavior.")
+    if surface_labels and any(is_docs_path(file) for file in files) and any(is_ui_text_path(file) for file in files):
+        impacts.append("Keeps the public-facing wording consistent across the app and README.")
     if "commit suggestion" in lowered_area or ("commit" in lowered_area and "suggest" in lowered_area):
         impacts.append("Makes generated commit messages reflect the changed files and project area more clearly.")
     if any(token in lowered_area for token in ("pull", "push", "pr", "branch", "merge", "git ")) and "test coverage" not in focus_topics:
@@ -825,7 +1053,10 @@ def derive_path_context(files: tuple[str, ...]) -> str | None:
             for part in Path(normalized).parts:
                 stem = Path(part).stem
                 for raw in re.findall(r"[A-Za-z][A-Za-z0-9_]*", stem):
-                    humanized = humanize_token(raw.casefold())
+                    lowered = raw.casefold()
+                    if lowered in COMMON_PATH_TOKENS:
+                        continue
+                    humanized = humanize_token(lowered)
                     if humanized not in tokens:
                         tokens.append(humanized)
     if not tokens:
@@ -833,6 +1064,16 @@ def derive_path_context(files: tuple[str, ...]) -> str | None:
     if len(tokens) == 1:
         return tokens[0]
     return f"{tokens[0]} and {tokens[1]}"
+
+
+def derive_file_context(files: tuple[str, ...]) -> str | None:
+    if len(files) != 1:
+        return None
+    target = Path(files[0])
+    stem = target.stem.casefold()
+    if stem and stem not in COMMON_PATH_TOKENS:
+        return humanize_token(stem)
+    return target.name if target.name else None
 
 
 def primary_source_files(files: tuple[str, ...]) -> tuple[str, ...]:
@@ -861,6 +1102,13 @@ def derive_test_area(files: tuple[str, ...]) -> str:
             stem = stem[len("test_") :]
         return f"{humanize_token(stem)} coverage"
     return "regression coverage"
+
+
+def should_adjust_wording(analysis: ChangeAnalysis) -> bool:
+    return bool(analysis.surface_labels) and not analysis.symbols and any(
+        label in {"page title", "page copy", "README wording", "page and README wording"}
+        for label in analysis.surface_labels
+    )
 
 
 def derive_git_area(files: tuple[str, ...], symbols: tuple[str, ...], diff: str) -> str | None:
@@ -953,6 +1201,11 @@ def humanize_token(token: str) -> str:
 def is_docs_path(path: str) -> bool:
     lowered = path.casefold()
     return lowered.endswith((".md", ".mdx", ".rst", ".txt")) or "readme" in lowered
+
+
+def is_ui_text_path(path: str) -> bool:
+    lowered = path.casefold()
+    return lowered.endswith((".html", ".htm", ".jsx", ".tsx", ".vue"))
 
 
 def is_test_path(path: str) -> bool:

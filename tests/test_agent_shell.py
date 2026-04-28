@@ -257,6 +257,7 @@ def test_shell_pull_wizard_uses_tracking_branch_without_extra_prompts(tmp_path: 
     ]
     shell.actions.git_remote_branches = lambda remote: ["main", "release"] if remote == "upstream" else ["main"]
     shell.actions.git_upstream_for = lambda branch=None: "upstream/main"
+    shell.actions.git_tracked_remote_target = lambda branch=None: ("upstream", "main")
     shell.actions.workspace_status = lambda: WorkspaceSnapshot(
         project=ProjectInfo(path=workspace, project_types=["python"], package_files=[], file_tree=[]),
         is_repo=True,
@@ -293,6 +294,7 @@ def test_shell_pull_wizard_asks_only_for_remote_and_branch_when_untracked(tmp_pa
     ]
     shell.actions.git_remote_branches = lambda remote: ["main", "release"] if remote == "upstream" else ["main"]
     shell.actions.git_upstream_for = lambda branch=None: None
+    shell.actions.git_tracked_remote_target = lambda branch=None: None
     shell.actions.workspace_status = lambda: WorkspaceSnapshot(
         project=ProjectInfo(path=workspace, project_types=["python"], package_files=[], file_tree=[]),
         is_repo=True,
@@ -337,6 +339,7 @@ def test_shell_push_wizard_uses_tracking_branch_without_extra_prompts(tmp_path: 
         changed_files=[" M devagent/cli/main.py"],
     )
     shell.actions.git_upstream_for = lambda branch=None: "origin/feature/git-upgrade"
+    shell.actions.git_tracked_remote_target = lambda branch=None: ("origin", "feature/git-upgrade")
     shell.actions.git_push = lambda **kwargs: PushOutcome(
         remote=kwargs["remote"],
         local_branch=kwargs["local_branch"],
@@ -375,6 +378,7 @@ def test_shell_push_wizard_asks_only_for_remote_and_branch_when_untracked(tmp_pa
         changed_files=[" M devagent/cli/main.py"],
     )
     shell.actions.git_upstream_for = lambda branch=None: None
+    shell.actions.git_tracked_remote_target = lambda branch=None: None
     shell.actions.git_push = lambda **kwargs: PushOutcome(
         remote=kwargs["remote"],
         local_branch=kwargs["local_branch"],
@@ -393,6 +397,42 @@ def test_shell_push_wizard_asks_only_for_remote_and_branch_when_untracked(tmp_pa
 
     assert result.remote == "origin"
     assert result.remote_branch == "feature/git-upgrade"
+    assert result.set_upstream is True
+
+
+def test_shell_push_wizard_ignores_broken_tracking_branch(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    shell = AgentShell(workspace)
+
+    shell.actions.git_remotes = lambda: [
+        GitRemote("origin", "https://github.com/me/repo.git", "https://github.com/me/repo.git", "me/repo"),
+    ]
+    shell.actions.workspace_status = lambda: WorkspaceSnapshot(
+        project=ProjectInfo(path=workspace, project_types=["python"], package_files=[], file_tree=[]),
+        is_repo=True,
+        branch="bug",
+        dirty=True,
+        changed_files=[" M README.md"],
+    )
+    shell.actions.git_upstream_for = lambda branch=None: "origin/origin"
+    shell.actions.git_tracked_remote_target = lambda branch=None: None
+    shell.actions.git_push = lambda **kwargs: PushOutcome(
+        remote=kwargs["remote"],
+        local_branch=kwargs["local_branch"],
+        remote_branch=kwargs["remote_branch"],
+        set_upstream=kwargs["set_upstream"],
+        force_with_lease=kwargs.get("force_with_lease", False),
+    )
+
+    monkeypatch.setattr("devagent.core.shell.Prompt.ask", lambda *args, **kwargs: "bug")
+    confirms = iter([True])
+    monkeypatch.setattr("devagent.core.shell.Confirm.ask", lambda *args, **kwargs: next(confirms))
+
+    result = shell.push_with_prompts()
+
+    assert result.remote == "origin"
+    assert result.remote_branch == "bug"
     assert result.set_upstream is True
 
 

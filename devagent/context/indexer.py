@@ -33,6 +33,14 @@ class CodeChunk:
 class CodeIndex:
     root: Path
     records: list[CodeChunk]
+    source_state: list["SourceFileState"] | None = None
+
+
+@dataclass(frozen=True)
+class SourceFileState:
+    path: str
+    size: int
+    mtime_ns: int
 
 
 class CodeIndexer:
@@ -45,8 +53,10 @@ class CodeIndexer:
         self.ai = AIClient.from_env()
 
     def build(self) -> CodeIndex:
+        source_state = self.current_source_state()
         chunks: list[CodeChunk] = []
-        for path in iter_source_files(self.root):
+        for state in source_state:
+            path = self.root / state.path
             text = read_text_safely(path)
             if not text:
                 continue
@@ -68,24 +78,50 @@ class CodeIndexer:
                 for chunk, embedding in zip(chunks, embeddings)
             ]
 
-        index = CodeIndex(root=self.root, records=chunks)
+        index = CodeIndex(root=self.root, records=chunks, source_state=source_state)
         self.save(index)
         return index
 
     def load_or_build(self) -> CodeIndex:
         if self.index_file.exists():
-            return self.load()
+            index = self.load()
+            if not self.is_current(index):
+                return self.build()
+            return index
         return self.build()
 
     def load(self) -> CodeIndex:
         data = json.loads(self.index_file.read_text(encoding="utf-8"))
         records = [CodeChunk(**item) for item in data.get("records", [])]
-        return CodeIndex(root=self.root, records=records)
+        source_state = [SourceFileState(**item) for item in data.get("source_state", [])] or None
+        return CodeIndex(root=self.root, records=records, source_state=source_state)
 
     def save(self, index: CodeIndex) -> None:
         self.index_dir.mkdir(parents=True, exist_ok=True)
-        payload = {"root": str(index.root), "records": [asdict(record) for record in index.records]}
+        payload = {
+            "root": str(index.root),
+            "records": [asdict(record) for record in index.records],
+            "source_state": [asdict(state) for state in index.source_state or []],
+        }
         self.index_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def current_source_state(self) -> list[SourceFileState]:
+        states: list[SourceFileState] = []
+        for path in iter_source_files(self.root):
+            stat = path.stat()
+            states.append(
+                SourceFileState(
+                    path=path.relative_to(self.root).as_posix(),
+                    size=stat.st_size,
+                    mtime_ns=stat.st_mtime_ns,
+                )
+            )
+        return states
+
+    def is_current(self, index: CodeIndex) -> bool:
+        if not index.source_state:
+            return False
+        return index.source_state == self.current_source_state()
 
     def _chunk_file(self, path: Path, text: str) -> list[CodeChunk]:
         lines = text.splitlines()

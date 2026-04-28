@@ -24,3 +24,22 @@ def test_retriever_finds_matching_chunk(tmp_path: Path) -> None:
 
     assert results
     assert results[0].path == "auth.py"
+
+
+def test_load_or_build_rebuilds_when_source_files_change(tmp_path: Path, monkeypatch) -> None:
+    config_home = tmp_path / "config-home"
+    monkeypatch.setenv("DEVAGENT_CONFIG_DIR", str(config_home))
+
+    readme = tmp_path / "README.md"
+    readme.write_text("Old ending\nAritrajit Guha\n", encoding="utf-8")
+    indexer = CodeIndexer(tmp_path, chunk_lines=10)
+    original = indexer.build()
+
+    assert any("Aritrajit Guha" in record.text for record in original.records)
+
+    readme.write_text("New ending\nagentic and personal.\n", encoding="utf-8")
+
+    refreshed = indexer.load_or_build()
+
+    assert any("agentic and personal." in record.text for record in refreshed.records)
+    assert all("Aritrajit Guha" not in record.text for record in refreshed.records)

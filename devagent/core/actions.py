@@ -59,6 +59,8 @@ class PullRequestPreview:
     summary: str
     title: str
     body: str
+    readiness: tuple[str, ...] = ()
+    ready_to_create: bool = True
 
 
 @dataclass(frozen=True)
@@ -266,6 +268,7 @@ class DevAgentActions:
         head_repo: str | None = None,
         draft: bool = False,
     ) -> PullRequestPreview:
+        readiness = self.git_tool.pr_readiness(base_branch=base, head_branch=head_branch)
         preview = self.git_tool.build_pr_preview(
             PullRequestOptions(
                 base_repo=base_repo,
@@ -279,6 +282,8 @@ class DevAgentActions:
             summary=f"Open PR from `{head_branch or self.git_tool.current_branch() or 'current-branch'}` into `{base}`.",
             title=preview.subject,
             body=preview.body,
+            readiness=readiness.blocking_reasons + readiness.notes,
+            ready_to_create=readiness.can_create_pr,
         )
 
     def pr_create(
@@ -316,6 +321,9 @@ class DevAgentActions:
 
     def git_remotes(self) -> list[GitRemote]:
         return self.git_tool.remotes()
+
+    def git_tracked_remote_target(self, branch: str | None = None) -> tuple[str, str] | None:
+        return self.git_tool.tracked_remote_target(branch)
 
     def git_remote_names(self) -> list[str]:
         return self.git_tool.remote_names()
