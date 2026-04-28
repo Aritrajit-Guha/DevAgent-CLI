@@ -6,7 +6,8 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
-from rich.table import Table
+
+from devagent.cli.ui import app_table
 
 
 @dataclass(frozen=True)
@@ -35,13 +36,21 @@ def choose_menu_action(console: Console, title: str, choices: list[MenuChoice]) 
                 ],
                 use_indicator=True,
                 use_shortcuts=False,
+                style=questionary.Style(
+                    [
+                        ("qmark", "fg:#67e8f9 bold"),
+                        ("pointer", "fg:#c084fc bold"),
+                        ("highlighted", "fg:#67e8f9 bold"),
+                        ("answer", "fg:#34d399 bold"),
+                    ]
+                ),
             ).ask()
             if answer is not None:
                 return str(answer)
         except Exception:
             pass
 
-    table = Table(title=title)
+    table = app_table(title)
     table.add_column("#", justify="right")
     table.add_column("Action")
     for index, choice in enumerate(choices, start=1):
@@ -59,14 +68,14 @@ def visible_directories(path: Path, limit: int = 50) -> list[Path]:
 def choose_directory(console: Console, start: Path, title: str) -> Path:
     current = start.expanduser().resolve()
     while True:
-        table = Table(title=f"{title}: {current}")
+        table = app_table(f"{title}: {current}")
         table.add_column("#", justify="right")
         table.add_column("Folder")
         folders = visible_directories(current)
         for index, folder in enumerate(folders, start=1):
             table.add_row(str(index), folder.name)
         console.print(table)
-        console.print("Enter a number to open a folder, [bold].[/bold] to choose this folder, [bold]..[/bold] to go up, or paste/type a path.")
+        console.print("[dim]Enter a number to open a folder, [bold].[/bold] to choose this folder, [bold]..[/bold] to go up, or paste/type a path.[/dim]")
         choice = Prompt.ask("Directory").strip()
         if choice == ".":
             return current

@@ -4,12 +4,10 @@ from pathlib import Path
 from typing import Optional
 
 import typer
-from rich.console import Console
-from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
-from rich.table import Table
 
 from devagent.cli.prompts import MenuChoice, can_use_arrow_menu, choose_directory, choose_menu_action
+from devagent.cli.ui import app_panel, app_table, console, hero_panel, status_badge, styled_path, toned_message
 from devagent.config.settings import ConfigManager
 from devagent.context.indexer import CodeIndexer
 from devagent.context.retriever import Retriever
@@ -44,8 +42,6 @@ git_app.add_typer(branch_app, name="branch")
 git_app.add_typer(pr_app, name="pr")
 git_app.add_typer(merge_app, name="merge")
 
-console = Console()
-
 
 def _workspace_path(explicit: Optional[Path] = None) -> Path:
     if explicit:
@@ -59,16 +55,16 @@ def _workspace_path(explicit: Optional[Path] = None) -> Path:
 def _print_project_status(path: Path) -> None:
     project = detect_project(path)
     git = GitTool(path)
-    table = Table(title="Workspace Status")
+    table = app_table("Workspace Status")
     table.add_column("Field")
     table.add_column("Value")
-    table.add_row("Path", str(project.path))
+    table.add_row("Path", styled_path(str(project.path)))
     table.add_row("Project type", ", ".join(project.project_types) or "unknown")
     table.add_row("Package files", ", ".join(project.package_files) or "none")
-    table.add_row("Git repository", "yes" if git.is_repo else "no")
+    table.add_row("Git repository", status_badge("yes", "success") if git.is_repo else status_badge("no", "warning"))
     if git.is_repo:
-        table.add_row("Branch", git.current_branch() or "unknown")
-        table.add_row("Dirty", "yes" if git.has_changes() else "no")
+        table.add_row("Branch", toned_message(git.current_branch() or "unknown", "info"))
+        table.add_row("Dirty", status_badge("yes", "warning") if git.has_changes() else status_badge("no", "success"))
         changed = git.changed_files()
         table.add_row("Changed files", "\n".join(changed) if changed else "none")
     console.print(table)
@@ -83,7 +79,8 @@ def _run_tool() -> RunTool:
 
 
 def _print_git_menu() -> None:
-    table = Table(title="DevAgent Git")
+    console.print(hero_panel("Git Assistant", "Command your repo with guided actions and neon telemetry."))
+    table = app_table("DevAgent Git")
     table.add_column("What You Want")
     table.add_column("Command To Run")
     table.add_row("See what changed and which branch you're on", "devagent git status")
@@ -108,7 +105,9 @@ def _print_run_menu() -> None:
     detected = tool.detect_launch_specs()
     saved = tool.saved_profiles()
 
-    detected_table = Table(title="Detected Run Targets")
+    console.print(hero_panel("Runtime Agent", "Spin up services, attach environments, and open the app in one move."))
+
+    detected_table = app_table("Detected Run Targets")
     detected_table.add_column("Name")
     detected_table.add_column("Folder")
     detected_table.add_column("Command")
@@ -119,7 +118,7 @@ def _print_run_menu() -> None:
         detected_table.add_row("No launchable services detected", "-", "-")
     console.print(detected_table)
 
-    saved_table = Table(title="Saved Run Phrases")
+    saved_table = app_table("Saved Run Phrases")
     saved_table.add_column("Phrase")
     saved_table.add_column("Launches")
     saved_table.add_column("Targets")
@@ -195,7 +194,7 @@ def _run_git_menu() -> None:
         except typer.Exit:
             continue
         except Exception as exc:
-            console.print(Panel(str(exc), title="Git Action Failed", style="red"))
+            console.print(app_panel(str(exc), "Git Action Failed", tone="error", expand=False))
 
 
 @git_app.callback()
@@ -219,7 +218,7 @@ def bind_workspace(path: Path = typer.Argument(..., help="Project folder to atta
     if not resolved.exists() or not resolved.is_dir():
         raise typer.BadParameter(f"Workspace does not exist or is not a directory: {resolved}")
     ConfigManager.bind_workspace(resolved)
-    console.print(Panel.fit(f"Bound workspace:\n[bold]{resolved}[/bold]", title="DevAgent"))
+    console.print(app_panel(f"Bound workspace:\n{resolved}", "Workspace Linked", tone="success", expand=False))
     _print_project_status(resolved)
 
 
@@ -238,10 +237,10 @@ def clone_repo(
     try:
         result = SetupTool.clone_from_github(repo_url, target, install_deps=install_deps, open_code=open_code)
     except RuntimeError as exc:
-        console.print(Panel(str(exc), title="Setup Failed", style="red"))
+        console.print(app_panel(str(exc), "Setup Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
     ConfigManager.bind_workspace(result.path)
-    console.print(Panel.fit(result.message, title="Clone Complete"))
+    console.print(app_panel(result.message, "Clone Complete", tone="success", expand=False))
     _print_project_status(result.path)
 
 
@@ -266,10 +265,10 @@ def publish_repo(
     try:
         result = SetupTool.publish_to_github(path, repo_name=repo_name, private=private, push=push)
     except (RuntimeError, ValueError) as exc:
-        console.print(Panel(str(exc), title="Publish Failed", style="red"))
+        console.print(app_panel(str(exc), "Publish Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
     ConfigManager.bind_workspace(result.path)
-    console.print(Panel.fit(result.message, title="Publish Complete"))
+    console.print(app_panel(result.message, "Publish Complete", tone="success", expand=False))
 
 
 @app.command("publish")
@@ -288,7 +287,7 @@ def new_project(
     start: Optional[Path] = typer.Option(None, "--start", "-s", help="Folder where the directory picker starts."),
 ) -> None:
     """Guided setup for cloning a GitHub repo or publishing a local project."""
-    console.print(Panel.fit("Let's connect a project to DevAgent.", title="New Project"))
+    console.print(hero_panel("New Project", "Clone an existing repo or publish local work without losing the flow."))
     mode = Prompt.ask(
         "Do you already have a GitHub repo, or do you have a local project to publish?",
         choices=["github", "local"],
@@ -314,14 +313,14 @@ def new_project(
 def index_workspace(path: Optional[Path] = typer.Option(None, "--path", "-p", help="Workspace path override.")) -> None:
     workspace = _workspace_path(path)
     index = CodeIndexer(workspace).build()
-    console.print(f"Indexed [bold]{len(index.records)}[/bold] chunks from [bold]{workspace}[/bold].")
+    console.print(app_panel(f"Indexed {len(index.records)} chunks from\n{workspace}", "Index Complete", tone="success", expand=False))
 
 
 @app.command("chat")
 def chat(question: str = typer.Argument(..., help="Question about the active workspace.")) -> None:
     workspace = _workspace_path()
     answer = RepoAgent(workspace).answer(question)
-    console.print(Panel(answer, title="DevAgent"))
+    console.print(app_panel(answer, "DevAgent Response", tone="info"))
 
 
 @app.command("packages")
@@ -330,10 +329,9 @@ def packages() -> None:
     workspace = _workspace_path()
     node_packages = find_node_packages(workspace)
     if not node_packages:
-        console.print("[yellow]No package.json dependencies found in the active workspace.[/yellow]")
-        console.print(f"Active workspace: [bold]{workspace}[/bold]")
+        console.print(app_panel(f"No package.json dependencies found.\nActive workspace: {workspace}", "Package Scan", tone="warning", expand=False))
         return
-    table = Table(title="Node Packages")
+    table = app_table("Node Packages")
     table.add_column("Manifest")
     table.add_column("Section")
     table.add_column("Package")
@@ -352,22 +350,22 @@ def run_start(
     try:
         specs = tool.launch_saved(phrase, open_browser=open_browser) if phrase else tool.launch_detected(open_browser=open_browser)
     except RuntimeError as exc:
-        console.print(Panel(str(exc), title="Run Failed", style="red"))
+        console.print(app_panel(str(exc), "Run Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
 
     sections = []
     for spec in specs:
         sections.append(
-            f"Launched [bold]{spec.name}[/bold] in [bold]{spec.scope(tool.workspace)}[/bold]\n"
-            f"Command: [cyan]{spec.display_command}[/cyan]"
+            f"Launched {spec.name} in {spec.scope(tool.workspace)}\n"
+            f"Command: {spec.display_command}"
         )
     if phrase:
-        sections.insert(0, f"Used saved run phrase: [bold]{phrase}[/bold]")
+        sections.insert(0, f"Used saved run phrase: {phrase}")
     if open_browser:
         browser_url = next((spec.browser_url for spec in specs if spec.browser_url), None)
         if browser_url:
-            sections.append(f"Opened browser at [link={browser_url}]{browser_url}[/link]")
-    console.print(Panel("\n\n".join(sections), title="Services Started"))
+            sections.append(f"Opened browser at {browser_url}")
+    console.print(app_panel("\n\n".join(sections), "Services Started", tone="success", expand=False))
 
 
 @run_app.command("save")
@@ -381,20 +379,20 @@ def run_save(
         if command:
             spec = tool.save_manual_profile(phrase, command, cwd=cwd)
             body = (
-                f"Saved phrase [bold]{phrase}[/bold]\n\n"
-                f"Folder: [bold]{spec.scope(tool.workspace)}[/bold]\n"
-                f"Command: [cyan]{spec.display_command}[/cyan]"
+                f"Saved phrase {phrase}\n\n"
+                f"Folder: {spec.scope(tool.workspace)}\n"
+                f"Command: {spec.display_command}"
             )
         else:
             specs = tool.save_detected_profile(phrase)
             body = (
-                f"Saved phrase [bold]{phrase}[/bold] for the detected stack.\n\n"
+                f"Saved phrase {phrase} for the detected stack.\n\n"
                 + "\n".join(f"- {spec.scope(tool.workspace)}: {spec.display_command}" for spec in specs)
             )
     except RuntimeError as exc:
-        console.print(Panel(str(exc), title="Save Failed", style="red"))
+        console.print(app_panel(str(exc), "Save Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
-    console.print(Panel(body, title="Run Phrase Saved"))
+    console.print(app_panel(body, "Run Phrase Saved", tone="success", expand=False))
 
 
 @run_app.command("list")
@@ -409,9 +407,9 @@ def run_forget(
     tool = _run_tool()
     deleted = tool.delete_profile(phrase)
     if not deleted:
-        console.print(Panel(f"No saved run phrase found: {phrase}", title="Nothing Deleted", style="yellow"))
+        console.print(app_panel(f"No saved run phrase found: {phrase}", "Nothing Deleted", tone="warning", expand=False))
         raise typer.Exit(code=1)
-    console.print(f"Removed saved run phrase [bold]{phrase}[/bold].")
+    console.print(toned_message(f"Removed saved run phrase {phrase}.", "success"))
 
 
 @app.command("edit")
@@ -422,25 +420,25 @@ def edit(
     workspace = _workspace_path()
     edit_agent = EditAgent(workspace)
     proposal = edit_agent.propose(instruction)
-    console.print(Panel(proposal.diff or proposal.message, title="Proposed Change"))
+    console.print(app_panel(proposal.diff or proposal.message, "Proposed Change", tone="info"))
     if not proposal.diff:
         raise typer.Exit(code=1)
     if yes or typer.confirm("Apply this diff?"):
         try:
             edit_agent.apply(proposal)
         except RuntimeError as exc:
-            console.print(Panel(str(exc), title="Edit Failed", style="red"))
-            console.print("[yellow]No files were changed.[/yellow]")
+            console.print(app_panel(str(exc), "Edit Failed", tone="error", expand=False))
+            console.print(toned_message("No files were changed.", "warning"))
             raise typer.Exit(code=1) from exc
-        console.print("[green]Applied change.[/green]")
+        console.print(toned_message("Applied change.", "success"))
     else:
-        console.print("[yellow]No files changed.[/yellow]")
+        console.print(toned_message("No files changed.", "warning"))
 
 
 @git_app.command("status")
 def git_status() -> None:
     tool = _git_tool()
-    console.print(tool.status_text())
+    console.print(app_panel(tool.status_text(), "Git Status", tone="info", expand=False))
 
 
 @git_app.command("add")
@@ -449,12 +447,12 @@ def git_add(path: str = typer.Argument(".", help="Path to stage. Defaults to the
     try:
         tool.add(path)
     except GitError as exc:
-        console.print(Panel(str(exc), title="Git Add Failed", style="red"))
+        console.print(app_panel(str(exc), "Git Add Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
     if path == ".":
-        console.print("[green]Staged the whole workspace.[/green]")
+        console.print(toned_message("Staged the whole workspace.", "success"))
     else:
-        console.print(f"Staged [bold]{path}[/bold].")
+        console.print(toned_message(f"Staged {path}.", "success"))
 
 
 @branch_app.command("create")
@@ -463,9 +461,9 @@ def create_branch(name: str = typer.Argument(..., help="New branch name.")) -> N
     try:
         tool.create_branch(name)
     except GitError as exc:
-        console.print(Panel(str(exc), title="Branch Create Failed", style="red"))
+        console.print(app_panel(str(exc), "Branch Create Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
-    console.print(f"Created and switched to branch [bold]{name}[/bold].")
+    console.print(toned_message(f"Created and switched to branch {name}.", "success"))
 
 
 @branch_app.command("switch")
@@ -479,9 +477,9 @@ def switch_branch(
     try:
         tool.switch_branch(name)
     except GitError as exc:
-        console.print(Panel(str(exc), title="Branch Switch Failed", style="red"))
+        console.print(app_panel(str(exc), "Branch Switch Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
-    console.print(f"Switched to branch [bold]{name}[/bold].")
+    console.print(toned_message(f"Switched to branch {name}.", "success"))
 
 
 @git_app.command("commit")
@@ -494,9 +492,9 @@ def git_commit(
     try:
         commit_id = tool.commit(final_message, all_files=all_files)
     except GitError as exc:
-        console.print(Panel(str(exc), title="Commit Failed", style="red"))
+        console.print(app_panel(str(exc), "Commit Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
-    console.print(f"Created commit [bold]{commit_id}[/bold]: {final_message}")
+    console.print(app_panel(f"Created commit {commit_id}\n\n{final_message}", "Commit Complete", tone="success", expand=False))
 
 
 @git_app.command("pull")
@@ -509,9 +507,9 @@ def git_pull(
     try:
         tool.pull(remote=remote, branch=branch, rebase=rebase)
     except GitError as exc:
-        console.print(Panel(str(exc), title="Pull Failed", style="red"))
+        console.print(app_panel(str(exc), "Pull Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
-    console.print(f"Pulled [bold]{branch or tool.current_branch() or 'current branch'}[/bold] from [bold]{remote}[/bold].")
+    console.print(toned_message(f"Pulled {branch or tool.current_branch() or 'current branch'} from {remote}.", "success"))
 
 
 @git_app.command("push")
@@ -521,9 +519,9 @@ def git_push(remote: str = "origin", branch: Optional[str] = None) -> None:
     try:
         tool.push(remote=remote, branch=target_branch)
     except GitError as exc:
-        console.print(Panel(str(exc), title="Push Failed", style="red"))
+        console.print(app_panel(str(exc), "Push Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
-    console.print(f"Pushed [bold]{target_branch}[/bold] to [bold]{remote}[/bold].")
+    console.print(toned_message(f"Pushed {target_branch} to {remote}.", "success"))
 
 
 @pr_app.command("preview")
@@ -531,7 +529,7 @@ def pr_preview(base: str = typer.Option("main", "--base", help="Base branch for 
     tool = _git_tool()
     title = tool.pr_title()
     body = tool.pr_body(base=base)
-    console.print(Panel(f"[bold]Title[/bold]\n{title}\n\n[bold]Body[/bold]\n{body}", title="Pull Request Preview"))
+    console.print(app_panel(f"TITLE\n{title}\n\nBODY\n{body}", "Pull Request Preview", tone="info"))
 
 
 @pr_app.command("create")
@@ -545,9 +543,9 @@ def pr_create(
     try:
         url = tool.create_pr(base=base, title=title, body=body, draft=draft)
     except GitError as exc:
-        console.print(Panel(str(exc), title="PR Failed", style="red"))
+        console.print(app_panel(str(exc), "PR Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
-    console.print(Panel(url or "Pull request created.", title="Pull Request"))
+    console.print(app_panel(url or "Pull request created.", "Pull Request", tone="success", expand=False))
 
 
 @merge_app.command("conflicts")
@@ -555,9 +553,9 @@ def merge_conflicts() -> None:
     tool = _git_tool()
     files = tool.conflict_files()
     if not files:
-        console.print("[green]No merge conflicts detected.[/green]")
+        console.print(toned_message("No merge conflicts detected.", "success"))
         return
-    table = Table(title="Merge Conflicts")
+    table = app_table("Merge Conflicts")
     table.add_column("File")
     table.add_column("Conflict Markers")
     for file in files:
@@ -571,9 +569,9 @@ def merge_abort() -> None:
     try:
         tool.merge_abort()
     except GitError as exc:
-        console.print(Panel(str(exc), title="Merge Abort Failed", style="red"))
+        console.print(app_panel(str(exc), "Merge Abort Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
-    console.print("[green]Aborted the merge.[/green]")
+    console.print(toned_message("Aborted the merge.", "success"))
 
 
 @merge_app.command("continue")
@@ -582,18 +580,18 @@ def merge_continue() -> None:
     try:
         tool.merge_continue()
     except GitError as exc:
-        console.print(Panel(str(exc), title="Merge Continue Failed", style="red"))
+        console.print(app_panel(str(exc), "Merge Continue Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
-    console.print("[green]Continued the merge.[/green]")
+    console.print(toned_message("Continued the merge.", "success"))
 
 
 @commit_app.command("suggest")
 def suggest_commit(conventional: bool = typer.Option(True, "--conventional/--plain")) -> None:
     tool = _git_tool()
     try:
-        console.print(tool.suggest_commit_message(conventional=conventional))
+        console.print(app_panel(tool.suggest_commit_message(conventional=conventional), "Commit Suggestion", tone="info", expand=False))
     except GitError as exc:
-        console.print(Panel(str(exc), title="Commit Suggestion Failed", style="red"))
+        console.print(app_panel(str(exc), "Commit Suggestion Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
 
 
@@ -602,7 +600,7 @@ def watch_workspace(
     interval: float = typer.Option(1.0, "--interval", help="Polling interval when watchdog is unavailable."),
 ) -> None:
     workspace = _workspace_path()
-    console.print(f"Watching [bold]{workspace}[/bold]. Press Ctrl+C to stop.")
+    console.print(app_panel(f"Watching {workspace}\nPress Ctrl+C to stop.", "Watch Mode", tone="info", expand=False))
     WatchService(workspace, interval=interval).run()
 
 
@@ -611,14 +609,15 @@ def inspect_workspace() -> None:
     workspace = _workspace_path()
     findings = Inspector(workspace).run()
     if not findings:
-        console.print("[green]No issues found.[/green]")
+        console.print(app_panel("No issues found.", "DevAgent Insights", tone="success", expand=False))
         return
-    table = Table(title="DevAgent Insights")
+    table = app_table("DevAgent Insights")
     table.add_column("Severity")
     table.add_column("File")
     table.add_column("Message")
     for finding in findings:
-        table.add_row(finding.severity, finding.path, finding.message)
+        tone = "error" if finding.severity == "high" else "warning" if finding.severity == "medium" else "info" if finding.severity == "info" else "success"
+        table.add_row(status_badge(finding.severity, tone), finding.path, finding.message)
     console.print(table)
 
 
