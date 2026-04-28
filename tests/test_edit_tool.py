@@ -154,6 +154,42 @@ def test_apply_handles_end_of_file_append_hunk(tmp_path: Path) -> None:
     assert text.endswith("Author\n\n---\nThank you for checking out this project!\n")
 
 
+def test_apply_fallback_locates_hunk_when_line_numbers_drift(tmp_path: Path, monkeypatch) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "README.md").write_text(
+        "Intro\n\nAdd a countdown before each round\n\nAuthor\nAritrajit Guha\n",
+        encoding="utf-8",
+    )
+
+    proposal = EditProposal(
+        instruction="Add a thank you at the end in README.md",
+        diff="""--- a/README.md
++++ b/README.md
+@@ -62,3 +62,6 @@
+ Add a countdown before each round
+ 
+ Author
++
+ Aritrajit Guha
++
++---
++Thank you for checking out this project!
+""",
+        message="Patch generated.",
+    )
+
+    def fake_run(args, cwd=None, input=None, capture_output=None):
+        stderr = b"error: patch failed: README.md:62\nerror: README.md: patch does not apply"
+        return subprocess.CompletedProcess(args=args, returncode=1, stdout=b"", stderr=stderr)
+
+    monkeypatch.setattr(edit_tool_module.subprocess, "run", fake_run)
+
+    EditAgent(tmp_path).apply(proposal)
+
+    text = (tmp_path / "README.md").read_text(encoding="utf-8")
+    assert text.endswith("Author\n\nAritrajit Guha\n\n---\nThank you for checking out this project!\n")
+
+
 class PromptCapturingAI:
     def __init__(self) -> None:
         self.available = True

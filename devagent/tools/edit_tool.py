@@ -276,7 +276,7 @@ def apply_hunks_to_lines(original_lines: list[str], patch: ParsedFilePatch, targ
     result: list[str] = []
     cursor = 0
     for hunk in patch.hunks:
-        start_index = max(hunk.old_start - 1, 0)
+        start_index = locate_hunk_source_index(original_lines, hunk, cursor, target_rel)
         if start_index < cursor:
             raise PatchApplyError(f"Patch hunks overlap while updating `{target_rel}`.")
         result.extend(original_lines[cursor:start_index])
@@ -302,6 +302,41 @@ def apply_hunks_to_lines(original_lines: list[str], patch: ParsedFilePatch, targ
         cursor = source_index
     result.extend(original_lines[cursor:])
     return result
+
+
+def locate_hunk_source_index(
+    original_lines: list[str],
+    hunk: ParsedHunk,
+    cursor: int,
+    target_rel: str,
+) -> int:
+    preferred = max(hunk.old_start - 1, cursor, 0)
+    source_lines = [line[1:] for line in hunk.lines if line and line[:1] in {" ", "-"}]
+
+    if not source_lines:
+        return min(preferred, len(original_lines))
+
+    if hunk_matches_at(original_lines, preferred, source_lines):
+        return preferred
+
+    search_limit = len(original_lines) - len(source_lines) + 1
+    candidates = [
+        index
+        for index in range(cursor, max(cursor, search_limit))
+        if hunk_matches_at(original_lines, index, source_lines)
+    ]
+    if not candidates:
+        raise PatchApplyError(f"Context mismatch while updating `{target_rel}`.")
+    return min(candidates, key=lambda index: abs(index - preferred))
+
+
+def hunk_matches_at(original_lines: list[str], start_index: int, source_lines: list[str]) -> bool:
+    if start_index < 0:
+        return False
+    end_index = start_index + len(source_lines)
+    if end_index > len(original_lines):
+        return False
+    return original_lines[start_index:end_index] == source_lines
 
 
 def infer_trailing_newline(original_text: str, updated_lines: list[str]) -> bool:
