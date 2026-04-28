@@ -43,6 +43,10 @@ devagent index
 devagent chat "Explain the project structure"
 devagent packages
 devagent git
+devagent run
+devagent run start
+devagent run start --open-browser
+devagent run save "I order you to start in the name of jesus"
 devagent git add
 devagent git commit
 devagent git pr preview
@@ -211,3 +215,55 @@ of the global Python interpreter.
 
 If you choose local, it lets you choose the local project folder, creates a GitHub
 repo using `gh`, adds `origin`, commits if needed, pushes, and binds the workspace.
+
+## Runtime Agent
+
+DevAgent can now act more like a local teammate by launching your workspace
+services for you instead of only describing what to run.
+
+Use:
+
+```powershell
+devagent run
+```
+
+That shows:
+
+- auto-detected launch targets such as `frontend> npm run dev`
+- Python app targets such as `backend> python main.py`
+- saved launch phrases for your workspace
+
+To launch the detected stack in separate terminals:
+
+```powershell
+devagent run start
+```
+
+To launch the stack and open the detected local app in your browser:
+
+```powershell
+devagent run start --open-browser
+```
+
+On Windows, Python services open in a new `cmd.exe` terminal with the local
+`.venv` activated automatically. If the `.venv` does not exist yet but the app
+has `requirements.txt` or `pyproject.toml`, DevAgent bootstraps that `.venv`
+before starting the service.
+
+To remember a startup phrase for the whole detected stack:
+
+```powershell
+devagent run save "I order you to start in the name of jesus"
+devagent run start "I order you to start in the name of jesus" --open-browser
+```
+
+To remember a custom one-off command:
+
+```powershell
+devagent run save "wake the frontend" --command "npm run dev" --cwd frontend
+devagent run start "wake the frontend"
+```
+
+These phrases are stored in DevAgent's workspace cache, not in your project's
+`package.json`, so the app's own scripts stay clean while DevAgent still feels
+agentic and personal.

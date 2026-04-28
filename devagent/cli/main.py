@@ -19,6 +19,7 @@ from devagent.tools.edit_tool import EditAgent
 from devagent.tools.git_tool import GitError, GitTool
 from devagent.tools.insights import Inspector
 from devagent.tools.node_tool import find_node_packages
+from devagent.tools.runtime_tool import RunTool
 from devagent.tools.setup_tool import SetupTool
 from devagent.watcher.file_watcher import WatchService
 
@@ -27,6 +28,7 @@ workspace_app = typer.Typer(help="Bind and inspect the active workspace.")
 setup_app = typer.Typer(help="Clone projects or publish local projects to GitHub.")
 new_app = typer.Typer(help="Guided onboarding flows for new or existing projects.")
 git_app = typer.Typer(help="Git workflow automation.", invoke_without_command=True)
+run_app = typer.Typer(help="Launch workspace services and save run phrases.", invoke_without_command=True)
 branch_app = typer.Typer(help="Branch helpers.")
 pr_app = typer.Typer(help="Pull request helpers.")
 merge_app = typer.Typer(help="Merge conflict helpers.")
@@ -36,6 +38,7 @@ app.add_typer(workspace_app, name="workspace")
 app.add_typer(setup_app, name="setup")
 app.add_typer(new_app, name="new")
 app.add_typer(git_app, name="git")
+app.add_typer(run_app, name="run")
 app.add_typer(commit_app, name="commit")
 git_app.add_typer(branch_app, name="branch")
 git_app.add_typer(pr_app, name="pr")
@@ -75,6 +78,10 @@ def _git_tool() -> GitTool:
     return GitTool(_workspace_path())
 
 
+def _run_tool() -> RunTool:
+    return RunTool(_workspace_path())
+
+
 def _print_git_menu() -> None:
     table = Table(title="DevAgent Git")
     table.add_column("What You Want")
@@ -94,6 +101,34 @@ def _print_git_menu() -> None:
     table.add_row("Abort a merge that went sideways", "devagent git merge abort")
     table.add_row("Continue after resolving conflicts", "devagent git merge continue")
     console.print(table)
+
+
+def _print_run_menu() -> None:
+    tool = _run_tool()
+    detected = tool.detect_launch_specs()
+    saved = tool.saved_profiles()
+
+    detected_table = Table(title="Detected Run Targets")
+    detected_table.add_column("Name")
+    detected_table.add_column("Folder")
+    detected_table.add_column("Command")
+    if detected:
+        for spec in detected:
+            detected_table.add_row(spec.name, spec.scope(tool.workspace), spec.display_command)
+    else:
+        detected_table.add_row("No launchable services detected", "-", "-")
+    console.print(detected_table)
+
+    saved_table = Table(title="Saved Run Phrases")
+    saved_table.add_column("Phrase")
+    saved_table.add_column("Launches")
+    saved_table.add_column("Targets")
+    if saved:
+        for phrase, specs in saved.items():
+            saved_table.add_row(phrase, str(len(specs)), "\n".join(spec.name for spec in specs))
+    else:
+        saved_table.add_row("No saved phrases yet", "-", "-")
+    console.print(saved_table)
 
 
 def git_action_choices() -> list[MenuChoice]:
@@ -170,6 +205,12 @@ def git_callback(ctx: typer.Context) -> None:
             _run_git_menu()
         else:
             _print_git_menu()
+
+
+@run_app.callback()
+def run_callback(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        _print_run_menu()
 
 
 @workspace_app.command("bind")
@@ -300,6 +341,77 @@ def packages() -> None:
     for package in node_packages:
         table.add_row(package.manifest, package.section, package.name, package.version)
     console.print(table)
+
+
+@run_app.command("start")
+def run_start(
+    phrase: Optional[str] = typer.Argument(None, help="Saved run phrase to launch. Defaults to detected services."),
+    open_browser: bool = typer.Option(True, "--open-browser/--no-open-browser", help="Open the detected local app URL after launching services."),
+) -> None:
+    tool = _run_tool()
+    try:
+        specs = tool.launch_saved(phrase, open_browser=open_browser) if phrase else tool.launch_detected(open_browser=open_browser)
+    except RuntimeError as exc:
+        console.print(Panel(str(exc), title="Run Failed", style="red"))
+        raise typer.Exit(code=1) from exc
+
+    sections = []
+    for spec in specs:
+        sections.append(
+            f"Launched [bold]{spec.name}[/bold] in [bold]{spec.scope(tool.workspace)}[/bold]\n"
+            f"Command: [cyan]{spec.display_command}[/cyan]"
+        )
+    if phrase:
+        sections.insert(0, f"Used saved run phrase: [bold]{phrase}[/bold]")
+    if open_browser:
+        browser_url = next((spec.browser_url for spec in specs if spec.browser_url), None)
+        if browser_url:
+            sections.append(f"Opened browser at [link={browser_url}]{browser_url}[/link]")
+    console.print(Panel("\n\n".join(sections), title="Services Started"))
+
+
+@run_app.command("save")
+def run_save(
+    phrase: str = typer.Argument(..., help="Natural-language phrase to remember."),
+    command: Optional[str] = typer.Option(None, "--command", "-c", help="Manual command to launch instead of the detected stack."),
+    cwd: Optional[Path] = typer.Option(None, "--cwd", help="Working directory for --command. Defaults to the workspace root."),
+) -> None:
+    tool = _run_tool()
+    try:
+        if command:
+            spec = tool.save_manual_profile(phrase, command, cwd=cwd)
+            body = (
+                f"Saved phrase [bold]{phrase}[/bold]\n\n"
+                f"Folder: [bold]{spec.scope(tool.workspace)}[/bold]\n"
+                f"Command: [cyan]{spec.display_command}[/cyan]"
+            )
+        else:
+            specs = tool.save_detected_profile(phrase)
+            body = (
+                f"Saved phrase [bold]{phrase}[/bold] for the detected stack.\n\n"
+                + "\n".join(f"- {spec.scope(tool.workspace)}: {spec.display_command}" for spec in specs)
+            )
+    except RuntimeError as exc:
+        console.print(Panel(str(exc), title="Save Failed", style="red"))
+        raise typer.Exit(code=1) from exc
+    console.print(Panel(body, title="Run Phrase Saved"))
+
+
+@run_app.command("list")
+def run_list() -> None:
+    _print_run_menu()
+
+
+@run_app.command("forget")
+def run_forget(
+    phrase: str = typer.Argument(..., help="Saved run phrase to delete."),
+) -> None:
+    tool = _run_tool()
+    deleted = tool.delete_profile(phrase)
+    if not deleted:
+        console.print(Panel(f"No saved run phrase found: {phrase}", title="Nothing Deleted", style="yellow"))
+        raise typer.Exit(code=1)
+    console.print(f"Removed saved run phrase [bold]{phrase}[/bold].")
 
 
 @app.command("edit")
