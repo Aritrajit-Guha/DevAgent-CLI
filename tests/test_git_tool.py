@@ -60,8 +60,8 @@ def test_git_action_choices_are_descriptive() -> None:
     labels = [choice.label for choice in git_action_choices()]
 
     assert "See what changed and which branch you're on" in labels
-    assert "Pull a chosen remote branch into your current branch" in labels
-    assert "Create a pull request across repos and branches" in labels
+    assert "Pull the latest changes into this branch" in labels
+    assert "Open a PR for this branch" in labels
     assert "Exit Git assistant" in labels
 
 
@@ -101,10 +101,11 @@ def test_suggest_commit_is_specific_for_git_and_help_changes(tmp_path: Path) -> 
     suggestion = tool.suggest_commit()
 
     assert suggestion.subject.startswith("chore:")
-    assert "guided Git workflows" in suggestion.subject
-    assert "CLI help catalogs" in suggestion.subject
+    assert "git pull, push, and PR flows" in suggestion.subject
+    assert suggestion.project_area == "git pull, push, and PR flows"
+    assert suggestion.body_bullets
     assert "`devagent/tools/git_tool.py`" in suggestion.body
-    assert "Makes pull, push, branch, and PR work more explicit" in suggestion.body
+    assert "Makes everyday Git actions easier to understand for normal project work." in suggestion.body
 
 
 def test_suggest_commit_handles_docs_only_changes(tmp_path: Path) -> None:
@@ -116,7 +117,8 @@ def test_suggest_commit_handles_docs_only_changes(tmp_path: Path) -> None:
     suggestion = tool.suggest_commit()
 
     assert suggestion.subject.startswith("docs:")
-    assert "readme" in suggestion.subject.casefold()
+    assert "readme guidance" in suggestion.subject.casefold()
+    assert suggestion.project_area == "README guidance"
     assert "README.md" in suggestion.body
 
 
@@ -129,7 +131,7 @@ def test_suggest_commit_handles_tests_only_changes(tmp_path: Path) -> None:
     suggestion = tool.suggest_commit()
 
     assert suggestion.subject.startswith("test:")
-    assert "regression coverage" in suggestion.subject
+    assert "git tool coverage" in suggestion.subject
     assert "Adds stronger regression protection" in suggestion.body
 
 

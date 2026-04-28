@@ -83,6 +83,8 @@ class GitRemote:
 class CommitSuggestion:
     subject: str
     body: str
+    body_bullets: tuple[str, ...] = ()
+    project_area: str = ""
     changed_files: tuple[str, ...] = ()
     change_summary: tuple[str, ...] = ()
     impact_summary: tuple[str, ...] = ()
@@ -150,9 +152,10 @@ class ChangeAnalysis:
     key_files: tuple[str, ...]
     prefix: str
     action: str
-    scope_label: str
+    project_area: str
     change_summary: tuple[str, ...]
     impact_summary: tuple[str, ...]
+    body_bullets: tuple[str, ...]
 
 
 class GitTool:
@@ -272,8 +275,13 @@ class GitTool:
     def add_all(self) -> None:
         self._run(["git", "add", "."])
 
-    def pull(self, options: PullOptions | None = None, *, remote: str = "origin", branch: str | None = None, rebase: bool = False) -> PullResult:
-        plan = options or PullOptions(remote=remote, branch=branch or self.current_branch() or "", rebase=rebase)
+    def pull(self, options: PullOptions | None = None, *, remote: str | None = None, branch: str | None = None, rebase: bool = False) -> PullResult:
+        tracked = self.tracked_remote_target()
+        plan = options or PullOptions(
+            remote=remote or (tracked[0] if tracked else self.default_remote_name() or "origin"),
+            branch=branch or (tracked[1] if tracked else self.current_branch() or ""),
+            rebase=rebase,
+        )
         if not plan.branch:
             raise GitError("Could not determine which branch to pull.")
         args = ["git", "pull", plan.remote, plan.branch]
@@ -305,7 +313,7 @@ class GitTool:
         self,
         options: PushOptions | None = None,
         *,
-        remote: str = "origin",
+        remote: str | None = None,
         branch: str | None = None,
         local_branch: str | None = None,
         remote_branch: str | None = None,
@@ -315,12 +323,14 @@ class GitTool:
         local = local_branch or branch or self.current_branch()
         if not local:
             raise GitError("Could not determine which local branch to push.")
-        destination = remote_branch or branch or local
+        tracked = self.tracked_remote_target(local)
+        resolved_remote = remote or (tracked[0] if tracked else self.default_remote_name() or "origin")
+        destination = remote_branch or branch or (tracked[1] if tracked else local)
         plan = options or PushOptions(
-            remote=remote,
+            remote=resolved_remote,
             local_branch=local,
             remote_branch=destination,
-            set_upstream=set_upstream,
+            set_upstream=set_upstream if tracked is None else False,
             force_with_lease=force_with_lease,
         )
         args = ["git", "push"]
@@ -369,6 +379,39 @@ class GitTool:
     def pr_title(self, *, base_branch: str = "main") -> str:
         return self.suggest_commit(conventional=False).subject
 
+    def tracked_remote_target(self, branch: str | None = None) -> tuple[str, str] | None:
+        upstream = self.upstream_for(branch)
+        if not upstream or "/" not in upstream:
+            return None
+        remote, remote_branch = upstream.split("/", 1)
+        if not remote or not remote_branch:
+            return None
+        return remote, remote_branch
+
+    def default_remote_name(self) -> str | None:
+        remotes = self.remotes()
+        for preferred in ("origin", "upstream"):
+            match = next((remote.name for remote in remotes if remote.name == preferred), None)
+            if match:
+                return match
+        return remotes[0].name if remotes else None
+
+    def default_base_repo(self) -> str | None:
+        remotes = self.remotes()
+        for preferred in ("upstream", "origin"):
+            match = next((remote.repo_slug for remote in remotes if remote.name == preferred and remote.repo_slug), None)
+            if match:
+                return match
+        return next((remote.repo_slug for remote in remotes if remote.repo_slug), None)
+
+    def default_head_repo(self) -> str | None:
+        remotes = self.remotes()
+        for preferred in ("origin", "upstream"):
+            match = next((remote.repo_slug for remote in remotes if remote.name == preferred and remote.repo_slug), None)
+            if match:
+                return match
+        return next((remote.repo_slug for remote in remotes if remote.repo_slug), None)
+
     def pr_body(
         self,
         *,
@@ -388,33 +431,37 @@ class GitTool:
         return preview.body
 
     def build_pr_preview(self, options: PullRequestOptions) -> CommitSuggestion:
+        base_repo = options.base_repo or self.default_base_repo()
+        head_repo = options.head_repo or self.default_head_repo() or base_repo
+        head_branch = options.head_branch or self.current_branch() or "current-branch"
         suggestion = self.suggest_commit(conventional=False)
         files = self.changed_files_since(options.base_branch) or [normalize_status_path(line) for line in self.changed_files()]
         summary_lines = [
-            f"Base repo: `{options.base_repo or 'current gh repo'}`",
-            f"Base branch: `{options.base_branch}`",
-            f"Head repo: `{options.head_repo or options.base_repo or 'current branch repo'}`",
-            f"Head branch: `{options.head_branch}`",
+            f"Open PR from `{head_branch}` into `{options.base_branch}`.",
         ]
-        if files:
-            summary_lines.append("")
-            summary_lines.append("Changed files:")
-            summary_lines.extend(f"- `{file}`" for file in files[:20])
+        if base_repo and head_repo and base_repo != head_repo:
+            summary_lines.append(f"Source: `{head_repo}` -> `{base_repo}`.")
+        elif base_repo:
+            summary_lines.append(f"Repo: `{base_repo}`.")
+        if options.draft:
+            summary_lines.append("This PR will open as a draft.")
 
-        stat = self.diff_stat_since(options.base_branch)
         body_sections = ["## Summary", "", *summary_lines]
-        if suggestion.change_summary:
+        if suggestion.body_bullets:
+            body_sections.extend(["", "## What changed", ""])
+            body_sections.extend(f"- {line}" for line in suggestion.body_bullets)
+        elif suggestion.change_summary:
             body_sections.extend(["", "## What changed", ""])
             body_sections.extend(f"- {line}" for line in suggestion.change_summary)
-        if suggestion.impact_summary:
-            body_sections.extend(["", "## Impact", ""])
-            body_sections.extend(f"- {line}" for line in suggestion.impact_summary)
-        if stat:
-            body_sections.extend(["", "## Diff Stat", "", "```text", stat, "```"])
+        if files:
+            body_sections.extend(["", "## Files changed", ""])
+            body_sections.extend(f"- `{file}`" for file in files[:12])
 
         return CommitSuggestion(
             subject=options.title or suggestion.subject,
             body=options.body or "\n".join(body_sections).strip(),
+            body_bullets=suggestion.body_bullets,
+            project_area=suggestion.project_area,
             changed_files=tuple(files),
             change_summary=suggestion.change_summary,
             impact_summary=suggestion.impact_summary,
@@ -433,9 +480,9 @@ class GitTool:
         draft: bool = False,
     ) -> str:
         options = PullRequestOptions(
-            base_repo=base_repo,
+            base_repo=base_repo or self.default_base_repo(),
             base_branch=base_branch,
-            head_repo=head_repo,
+            head_repo=head_repo or self.default_head_repo(),
             head_branch=head_branch or self.current_branch() or "current-branch",
             draft=draft,
             title=title,
@@ -593,9 +640,10 @@ def analyze_changes(changed: list[str], diff: str, staged_diff: str = "") -> Cha
     symbols = extract_symbols(diff or staged_diff)
     focus_topics = derive_focus_topics(files, diff, symbols)
     key_files = select_key_files(files)
-    scope_label = derive_scope_label(files, focus_topics)
-    change_summary = build_change_summary(files, focus_topics, symbols)
-    impact_summary = build_impact_summary(focus_topics, files)
+    project_area = derive_project_area(files, focus_topics, symbols, diff)
+    change_summary = build_change_summary(files, focus_topics, symbols, project_area)
+    impact_summary = build_impact_summary(project_area, focus_topics, files)
+    body_bullets = build_body_bullets(change_summary, impact_summary, select_key_files(primary_source_files(files)))
     return ChangeAnalysis(
         files=files,
         diff=diff,
@@ -606,9 +654,10 @@ def analyze_changes(changed: list[str], diff: str, staged_diff: str = "") -> Cha
         key_files=key_files,
         prefix=prefix,
         action=action,
-        scope_label=scope_label,
+        project_area=project_area,
         change_summary=change_summary,
         impact_summary=impact_summary,
+        body_bullets=body_bullets,
     )
 
 
@@ -618,6 +667,8 @@ def build_deterministic_commit_suggestion(analysis: ChangeAnalysis, *, conventio
     return CommitSuggestion(
         subject=subject,
         body=body,
+        body_bullets=analysis.body_bullets,
+        project_area=analysis.project_area,
         changed_files=analysis.key_files,
         change_summary=analysis.change_summary,
         impact_summary=analysis.impact_summary,
@@ -627,7 +678,7 @@ def build_deterministic_commit_suggestion(analysis: ChangeAnalysis, *, conventio
 
 def build_subject_line(analysis: ChangeAnalysis, *, conventional: bool) -> str:
     action = analysis.action
-    scope = analysis.scope_label
+    scope = analysis.project_area
     if action == "document":
         phrase = f"document {scope}"
     elif action == "cover":
@@ -651,16 +702,7 @@ def build_subject_line(analysis: ChangeAnalysis, *, conventional: bool) -> str:
 
 
 def build_commit_body(analysis: ChangeAnalysis) -> str:
-    bullets: list[str] = []
-    bullets.extend(analysis.change_summary)
-    bullets.extend(analysis.impact_summary)
-    if analysis.key_files:
-        if len(analysis.key_files) == 1:
-            bullets.append(f"Affects `{analysis.key_files[0]}` directly.")
-        else:
-            head = ", ".join(f"`{file}`" for file in analysis.key_files[:3])
-            bullets.append(f"Affects {head} and related files.")
-    return "\n".join(f"- {line}" for line in unique_limited(bullets, 6)).strip()
+    return "\n".join(f"- {line}" for line in analysis.body_bullets).strip()
 
 
 def derive_focus_topics(files: tuple[str, ...], diff: str, symbols: tuple[str, ...]) -> tuple[str, ...]:
@@ -688,27 +730,36 @@ def derive_focus_topics(files: tuple[str, ...], diff: str, symbols: tuple[str, .
     return tuple(unique_limited(matched_topics, 2)) or ("project changes",)
 
 
-def derive_scope_label(files: tuple[str, ...], focus_topics: tuple[str, ...]) -> str:
+def derive_project_area(files: tuple[str, ...], focus_topics: tuple[str, ...], symbols: tuple[str, ...], diff: str) -> str:
     if not files:
         return "project changes"
-    path_context = derive_path_context(files)
-    if files and all(is_docs_path(file) for file in files) and path_context:
+    primary_files = primary_source_files(files)
+    if files and all(is_docs_path(file) for file in files):
+        return derive_docs_area(files)
+    if files and all(is_test_path(file) for file in files):
+        return derive_test_area(files)
+    git_area = derive_git_area(primary_files, symbols, diff)
+    if git_area:
+        return git_area
+    symbol_area = derive_symbol_area(symbols)
+    if symbol_area:
+        return symbol_area
+    path_context = derive_path_context(primary_files)
+    if path_context:
         return path_context
     recognized = [TOPIC_SCOPE_LABELS[topic] for topic in focus_topics if topic in TOPIC_SCOPE_LABELS]
     if len(recognized) >= 2:
         return f"{recognized[0]} and {recognized[1]}"
     if recognized:
         return recognized[0]
-    if path_context:
-        return path_context
     if len(focus_topics) == 1:
         return focus_topics[0]
-    return f"{focus_topics[0]} and {focus_topics[1]}"
+    return "project changes"
 
 
-def build_change_summary(files: tuple[str, ...], focus_topics: tuple[str, ...], symbols: tuple[str, ...]) -> tuple[str, ...]:
+def build_change_summary(files: tuple[str, ...], focus_topics: tuple[str, ...], symbols: tuple[str, ...], project_area: str) -> tuple[str, ...]:
     summaries: list[str] = []
-    primary_files = select_key_files(files)
+    primary_files = select_key_files(primary_source_files(files))
     if primary_files:
         if len(primary_files) == 1:
             summaries.append(f"Updates `{primary_files[0]}`.")
@@ -716,21 +767,28 @@ def build_change_summary(files: tuple[str, ...], focus_topics: tuple[str, ...], 
             summaries.append(
                 f"Updates {', '.join(f'`{file}`' for file in primary_files[:3])} and related files."
             )
+    if project_area:
+        summaries.append(f"Focuses on {project_area}.")
     if symbols:
-        summaries.append(f"Touches key symbols such as {', '.join(f'`{symbol}`' for symbol in symbols[:4])}.")
-    if focus_topics:
+        summaries.append(f"Touches {', '.join(f'`{symbol}`' for symbol in symbols[:4])}.")
+    elif focus_topics:
         summaries.append(f"Centers the work on {', '.join(topic.casefold() for topic in focus_topics[:2])}.")
     return tuple(unique_limited(summaries, 3))
 
 
-def build_impact_summary(focus_topics: tuple[str, ...], files: tuple[str, ...]) -> tuple[str, ...]:
+def build_impact_summary(project_area: str, focus_topics: tuple[str, ...], files: tuple[str, ...]) -> tuple[str, ...]:
     impacts: list[str] = []
+    lowered_area = project_area.casefold()
+    if "coverage" in lowered_area or "test coverage" in focus_topics:
+        impacts.append("Adds stronger regression protection for the updated behavior.")
+    if "commit suggestion" in lowered_area or ("commit" in lowered_area and "suggest" in lowered_area):
+        impacts.append("Makes generated commit messages reflect the changed files and project area more clearly.")
+    if any(token in lowered_area for token in ("pull", "push", "pr", "branch", "merge", "git ")) and "test coverage" not in focus_topics:
+        impacts.append("Makes everyday Git actions easier to understand for normal project work.")
+    if any(token in lowered_area for token in ("help", "guidance", "readme", "documentation")):
+        impacts.append("Keeps the command surface clearer for people using DevAgent.")
     for topic in focus_topics:
-        if topic == "Git workflows":
-            impacts.append("Makes pull, push, branch, and PR work more explicit for DevAgent users.")
-        elif topic == "CLI help":
-            impacts.append("Gives users a clearer command catalog and richer nested help pages.")
-        elif topic == "repo chat":
+        if topic == "repo chat":
             impacts.append("Improves how clearly DevAgent explains repository behavior.")
         elif topic == "runtime launch flows":
             impacts.append("Makes local project startup flows easier to run from the CLI.")
@@ -738,11 +796,20 @@ def build_impact_summary(focus_topics: tuple[str, ...], files: tuple[str, ...]) 
             impacts.append("Strengthens repo hygiene and safety feedback.")
         elif topic == "workspace setup":
             impacts.append("Smooths onboarding and workspace setup flows.")
-        elif topic == "test coverage":
-            impacts.append("Adds stronger regression protection for the updated behavior.")
     if not impacts and files:
         impacts.append(f"Affects {len(files)} changed file(s) across the workspace.")
     return tuple(unique_limited(impacts, 2))
+
+
+def build_body_bullets(change_summary: tuple[str, ...], impact_summary: tuple[str, ...], key_files: tuple[str, ...]) -> tuple[str, ...]:
+    bullets: list[str] = list(change_summary)
+    bullets.extend(impact_summary)
+    if key_files:
+        if len(key_files) == 1:
+            bullets.append(f"Primary file: `{key_files[0]}`.")
+        else:
+            bullets.append(f"Key files: {', '.join(f'`{file}`' for file in key_files[:3])}.")
+    return tuple(unique_limited(bullets, 4))
 
 
 def derive_path_context(files: tuple[str, ...]) -> str | None:
@@ -766,6 +833,78 @@ def derive_path_context(files: tuple[str, ...]) -> str | None:
     if len(tokens) == 1:
         return tokens[0]
     return f"{tokens[0]} and {tokens[1]}"
+
+
+def primary_source_files(files: tuple[str, ...]) -> tuple[str, ...]:
+    non_tests = tuple(file for file in files if not is_test_path(file))
+    non_docs = tuple(file for file in non_tests if not is_docs_path(file))
+    if non_docs:
+        return non_docs
+    if non_tests:
+        return non_tests
+    return files
+
+
+def derive_docs_area(files: tuple[str, ...]) -> str:
+    if len(files) == 1:
+        stem = Path(files[0]).stem
+        if stem.casefold() == "readme":
+            return "README guidance"
+        return f"{humanize_token(stem)} guidance"
+    return "documentation guidance"
+
+
+def derive_test_area(files: tuple[str, ...]) -> str:
+    if len(files) == 1:
+        stem = Path(files[0]).stem
+        if stem.startswith("test_"):
+            stem = stem[len("test_") :]
+        return f"{humanize_token(stem)} coverage"
+    return "regression coverage"
+
+
+def derive_git_area(files: tuple[str, ...], symbols: tuple[str, ...], diff: str) -> str | None:
+    text = " ".join(files) + "\n" + diff + "\n" + " ".join(symbols)
+    lowered = text.casefold()
+    phrases: list[str] = []
+    if "suggest_commit" in lowered or ("commit" in lowered and "message" in lowered):
+        phrases.append("commit suggestions")
+    operations = detect_git_operations(lowered)
+    flow_ops = [operation for operation in operations if operation in {"pull", "push", "PR", "merge", "branch"}]
+    if flow_ops:
+        phrases.append(f"git {join_human_list(flow_ops)} flows")
+    if "help" in lowered and not phrases:
+        phrases.append("Git help guidance")
+    if phrases:
+        return join_human_list(phrases[:2])
+    return None
+
+
+def derive_symbol_area(symbols: tuple[str, ...]) -> str | None:
+    cleaned = []
+    for symbol in symbols:
+        lowered = symbol.casefold()
+        if lowered.startswith("test_"):
+            continue
+        cleaned.append(humanize_token(symbol))
+    if not cleaned:
+        return None
+    return join_human_list(cleaned[:2])
+
+
+def detect_git_operations(lowered_text: str) -> list[str]:
+    operations: list[str] = []
+    if any(token in lowered_text for token in ("pull_with_prompts", " git pull", "pull ")):
+        operations.append("pull")
+    if any(token in lowered_text for token in ("push_with_prompts", " git push", "push ")):
+        operations.append("push")
+    if any(token in lowered_text for token in ("pr_preview", "pr_create", "pull request", "gh pr", "pr ")):
+        operations.append("PR")
+    if any(token in lowered_text for token in ("merge_abort", "merge_continue", "merge conflict", "merge ")):
+        operations.append("merge")
+    if any(token in lowered_text for token in ("branch_create", "branch_switch", "checkout", "branch ")):
+        operations.append("branch")
+    return unique_limited(operations, 3)
 
 
 def select_key_files(files: tuple[str, ...]) -> tuple[str, ...]:
@@ -848,6 +987,8 @@ def parse_ai_commit_suggestion(response: str, fallback: CommitSuggestion) -> Com
     return CommitSuggestion(
         subject=subject,
         body=body,
+        body_bullets=fallback.body_bullets,
+        project_area=fallback.project_area,
         changed_files=fallback.changed_files,
         change_summary=fallback.change_summary,
         impact_summary=fallback.impact_summary,
@@ -882,6 +1023,17 @@ def unique_limited(values: list[str], limit: int) -> list[str]:
         if len(seen) >= limit:
             break
     return seen
+
+
+def join_human_list(values: list[str] | tuple[str, ...]) -> str:
+    cleaned = [value for value in values if value]
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    if len(cleaned) == 2:
+        return f"{cleaned[0]} and {cleaned[1]}"
+    return ", ".join(cleaned[:-1]) + f", and {cleaned[-1]}"
 
 
 def truncate_text(value: str, limit: int) -> str:

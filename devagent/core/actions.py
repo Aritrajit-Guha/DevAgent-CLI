@@ -56,6 +56,7 @@ class CommitOutcome:
 
 @dataclass(frozen=True)
 class PullRequestPreview:
+    summary: str
     title: str
     body: str
 
@@ -218,8 +219,8 @@ class DevAgentActions:
         final_message = suggestion.full_message if isinstance(suggestion, CommitSuggestion) else suggestion
         return CommitOutcome(commit_id=commit_id, message=final_message)
 
-    def git_pull(self, *, remote: str = "origin", branch: str | None = None, rebase: bool = False) -> PullOutcome:
-        result = self.git_tool.pull(PullOptions(remote=remote, branch=branch or self.git_tool.current_branch() or "", rebase=rebase))
+    def git_pull(self, *, remote: str | None = None, branch: str | None = None, rebase: bool = False) -> PullOutcome:
+        result = self.git_tool.pull(PullOptions(remote=remote or self.git_tool.default_remote_name() or "origin", branch=branch or self.git_tool.current_branch() or "", rebase=rebase) if remote or branch or rebase else None)
         return PullOutcome(
             local_branch=result.local_branch,
             remote=result.remote,
@@ -230,7 +231,7 @@ class DevAgentActions:
     def git_push(
         self,
         *,
-        remote: str = "origin",
+        remote: str | None = None,
         branch: str | None = None,
         local_branch: str | None = None,
         remote_branch: str | None = None,
@@ -239,12 +240,14 @@ class DevAgentActions:
     ) -> PushOutcome:
         result = self.git_tool.push(
             PushOptions(
-                remote=remote,
+                remote=remote or self.git_tool.default_remote_name() or "origin",
                 local_branch=local_branch or branch or self.git_tool.current_branch() or "",
                 remote_branch=remote_branch or branch or local_branch or self.git_tool.current_branch() or "",
                 set_upstream=set_upstream,
                 force_with_lease=force_with_lease,
             )
+            if any(value is not None for value in (remote, branch, local_branch, remote_branch)) or force_with_lease is not False or set_upstream is not True
+            else None
         )
         return PushOutcome(
             remote=result.remote,
@@ -272,7 +275,11 @@ class DevAgentActions:
                 draft=draft,
             )
         )
-        return PullRequestPreview(title=preview.subject, body=preview.body)
+        return PullRequestPreview(
+            summary=f"Open PR from `{head_branch or self.git_tool.current_branch() or 'current-branch'}` into `{base}`.",
+            title=preview.subject,
+            body=preview.body,
+        )
 
     def pr_create(
         self,

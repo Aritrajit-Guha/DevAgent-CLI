@@ -230,7 +230,7 @@ def test_git_pull_help_shows_explicit_remote_and_branch_flags(monkeypatch) -> No
     assert result.exit_code == 0
     assert "--remote" in result.stdout
     assert "--branch" in result.stdout
-    assert "Replay local commits on top of the pulled branch" in result.stdout
+    assert "tracked remote" in result.stdout
 
 
 def test_interactive_terminal_helper(monkeypatch) -> None:
@@ -246,7 +246,7 @@ def test_interactive_terminal_helper(monkeypatch) -> None:
     assert interactive_terminal() is True
 
 
-def test_shell_pull_wizard_captures_remote_branch_and_strategy(tmp_path: Path, monkeypatch) -> None:
+def test_shell_pull_wizard_uses_tracking_branch_without_extra_prompts(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     shell = AgentShell(workspace)
@@ -264,7 +264,43 @@ def test_shell_pull_wizard_captures_remote_branch_and_strategy(tmp_path: Path, m
         dirty=True,
         changed_files=[" M devagent/core/shell.py"],
     )
-    shell.actions.git_pull = lambda remote, branch, rebase: PullOutcome(
+    shell.actions.git_pull = lambda remote, branch, rebase=False: PullOutcome(
+        local_branch="feature/git-upgrade",
+        remote=remote,
+        remote_branch=branch or "main",
+        rebase=rebase,
+    )
+
+    shell.choose_named_value = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("tracked pull should not ask for remote or branch"))
+    confirms = iter([True])
+    monkeypatch.setattr("devagent.core.shell.Confirm.ask", lambda *args, **kwargs: next(confirms))
+
+    result = shell.pull_with_prompts()
+
+    assert result.remote == "upstream"
+    assert result.remote_branch == "main"
+    assert result.rebase is False
+
+
+def test_shell_pull_wizard_asks_only_for_remote_and_branch_when_untracked(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    shell = AgentShell(workspace)
+
+    shell.actions.git_remotes = lambda: [
+        GitRemote("origin", "https://github.com/me/repo.git", "https://github.com/me/repo.git", "me/repo"),
+        GitRemote("upstream", "https://github.com/base/repo.git", "https://github.com/base/repo.git", "base/repo"),
+    ]
+    shell.actions.git_remote_branches = lambda remote: ["main", "release"] if remote == "upstream" else ["main"]
+    shell.actions.git_upstream_for = lambda branch=None: None
+    shell.actions.workspace_status = lambda: WorkspaceSnapshot(
+        project=ProjectInfo(path=workspace, project_types=["python"], package_files=[], file_tree=[]),
+        is_repo=True,
+        branch="feature/git-upgrade",
+        dirty=True,
+        changed_files=[" M devagent/core/shell.py"],
+    )
+    shell.actions.git_pull = lambda remote, branch, rebase=False: PullOutcome(
         local_branch="feature/git-upgrade",
         remote=remote,
         remote_branch=branch or "main",
@@ -273,17 +309,17 @@ def test_shell_pull_wizard_captures_remote_branch_and_strategy(tmp_path: Path, m
 
     picks = iter(["upstream", "release"])
     shell.choose_named_value = lambda *args, **kwargs: next(picks)
-    confirms = iter([True, True])
+    confirms = iter([True])
     monkeypatch.setattr("devagent.core.shell.Confirm.ask", lambda *args, **kwargs: next(confirms))
 
     result = shell.pull_with_prompts()
 
     assert result.remote == "upstream"
     assert result.remote_branch == "release"
-    assert result.rebase is True
+    assert result.rebase is False
 
 
-def test_shell_push_wizard_captures_remote_targets_and_force_with_lease(tmp_path: Path, monkeypatch) -> None:
+def test_shell_push_wizard_uses_tracking_branch_without_extra_prompts(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     shell = AgentShell(workspace)
@@ -300,18 +336,17 @@ def test_shell_push_wizard_captures_remote_targets_and_force_with_lease(tmp_path
         dirty=True,
         changed_files=[" M devagent/cli/main.py"],
     )
-    shell.actions.git_upstream_for = lambda branch=None: None
+    shell.actions.git_upstream_for = lambda branch=None: "origin/feature/git-upgrade"
     shell.actions.git_push = lambda **kwargs: PushOutcome(
         remote=kwargs["remote"],
         local_branch=kwargs["local_branch"],
         remote_branch=kwargs["remote_branch"],
         set_upstream=kwargs["set_upstream"],
-        force_with_lease=kwargs["force_with_lease"],
+        force_with_lease=kwargs.get("force_with_lease", False),
     )
 
-    picks = iter(["origin", "feature/git-upgrade", "feature/git-upgrade"])
-    shell.choose_named_value = lambda *args, **kwargs: next(picks)
-    confirms = iter([True, True, True])
+    shell.choose_named_value = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("tracked push should not ask for remote or branch"))
+    confirms = iter([True])
     monkeypatch.setattr("devagent.core.shell.Confirm.ask", lambda *args, **kwargs: next(confirms))
 
     result = shell.push_with_prompts()
@@ -319,11 +354,49 @@ def test_shell_push_wizard_captures_remote_targets_and_force_with_lease(tmp_path
     assert result.remote == "origin"
     assert result.local_branch == "feature/git-upgrade"
     assert result.remote_branch == "feature/git-upgrade"
+    assert result.set_upstream is False
+    assert result.force_with_lease is False
+
+
+def test_shell_push_wizard_asks_only_for_remote_and_branch_when_untracked(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    shell = AgentShell(workspace)
+
+    shell.actions.git_remotes = lambda: [
+        GitRemote("origin", "https://github.com/me/repo.git", "https://github.com/me/repo.git", "me/repo"),
+        GitRemote("upstream", "https://github.com/base/repo.git", "https://github.com/base/repo.git", "base/repo"),
+    ]
+    shell.actions.workspace_status = lambda: WorkspaceSnapshot(
+        project=ProjectInfo(path=workspace, project_types=["python"], package_files=[], file_tree=[]),
+        is_repo=True,
+        branch="feature/git-upgrade",
+        dirty=True,
+        changed_files=[" M devagent/cli/main.py"],
+    )
+    shell.actions.git_upstream_for = lambda branch=None: None
+    shell.actions.git_push = lambda **kwargs: PushOutcome(
+        remote=kwargs["remote"],
+        local_branch=kwargs["local_branch"],
+        remote_branch=kwargs["remote_branch"],
+        set_upstream=kwargs["set_upstream"],
+        force_with_lease=kwargs.get("force_with_lease", False),
+    )
+
+    picks = iter(["origin"])
+    shell.choose_named_value = lambda *args, **kwargs: next(picks)
+    monkeypatch.setattr("devagent.core.shell.Prompt.ask", lambda *args, **kwargs: "feature/git-upgrade")
+    confirms = iter([True])
+    monkeypatch.setattr("devagent.core.shell.Confirm.ask", lambda *args, **kwargs: next(confirms))
+
+    result = shell.push_with_prompts()
+
+    assert result.remote == "origin"
+    assert result.remote_branch == "feature/git-upgrade"
     assert result.set_upstream is True
-    assert result.force_with_lease is True
 
 
-def test_shell_pr_wizard_handles_base_and_head_repo_choices(tmp_path: Path, monkeypatch) -> None:
+def test_shell_pr_wizard_auto_detects_repos_and_only_asks_for_base_branch(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     shell = AgentShell(workspace)
@@ -343,13 +416,13 @@ def test_shell_pr_wizard_handles_base_and_head_repo_choices(tmp_path: Path, monk
         changed_files=[" M devagent/tools/git_tool.py"],
     )
     shell.actions.pr_preview = lambda **kwargs: PullRequestPreview(
+        summary="Open PR from `feature/git-upgrade` into `release`.",
         title="feat: upgrade guided Git workflows",
         body=f"Base {kwargs['base_repo']} -> Head {kwargs['head_repo']}",
     )
 
-    repo_picks = iter(["base/repo", "me/repo"])
-    shell.choose_repo_slug = lambda *args, **kwargs: next(repo_picks)
-    value_picks = iter(["release", "feature/git-upgrade"])
+    shell.choose_repo_slug = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("PR flow should auto-detect repos"))
+    value_picks = iter(["release"])
     shell.choose_named_value = lambda *args, **kwargs: next(value_picks)
     monkeypatch.setattr("devagent.core.shell.Confirm.ask", lambda *args, **kwargs: True)
 

@@ -81,8 +81,9 @@ GIT_HELP = dedent(
     Common workflows:
     - inspect repo state with `status`
     - stage and commit with richer generated messages
-    - pull or push with explicit remote/branch targeting
-    - preview or create PRs across same-repo and fork setups
+    - pull the current branch from its tracked remote
+    - push the current branch to GitHub without extra Git plumbing
+    - preview or open a PR from the current branch into `main`
     - inspect, abort, or continue merges with better context
     """
 ).strip()
@@ -180,11 +181,11 @@ def _print_git_menu() -> None:
     table.add_row("Switch to another branch safely", "devagent git branch switch <name>")
     table.add_row("Commit with an auto-generated message", "devagent git commit --all")
     table.add_row("Suggest a commit message without committing", "devagent commit suggest")
-    table.add_row("Pull a chosen remote branch into your current branch", "devagent git pull --remote upstream --branch main")
-    table.add_row("Push a chosen local branch to a remote target", "devagent git push --remote origin --local-branch feature --remote-branch feature")
-    table.add_row("Preview a pull request across repos and branches", "devagent git pr preview --base main --base-repo owner/repo --head-repo yourfork/repo")
-    table.add_row("Create a pull request across repos and branches", "devagent git pr create --base main --base-repo owner/repo --head-repo yourfork/repo")
-    table.add_row("Inspect the current merge and unresolved conflicts", "devagent git merge conflicts")
+    table.add_row("Pull the latest changes into this branch", "devagent git pull")
+    table.add_row("Push this branch to GitHub", "devagent git push")
+    table.add_row("Preview the PR title and description", "devagent git pr preview --base main")
+    table.add_row("Open a PR for this branch", "devagent git pr create --base main")
+    table.add_row("Check merge conflicts", "devagent git merge conflicts")
     table.add_row("Abort the current merge", "devagent git merge abort")
     table.add_row("Continue the current merge after resolution", "devagent git merge continue")
     console.print(table)
@@ -502,16 +503,15 @@ def git_commit(
 @git_app.command(
     "pull",
     help=(
-        "Pull from a chosen remote and branch, with an explicit merge or rebase strategy."
+        "Pull the latest changes into the current branch. DevAgent uses the tracked remote first and only asks for more when needed."
     ),
 )
 def git_pull(
-    remote: str = typer.Option("origin", "--remote", help="Remote to pull from, for example `origin` or `upstream`."),
-    branch: Optional[str] = typer.Option(None, "--branch", help="Remote branch to pull into the current local branch. Defaults to the current branch name."),
-    rebase: bool = typer.Option(False, "--rebase", help="Replay local commits on top of the pulled branch instead of creating a merge commit."),
+    remote: Optional[str] = typer.Option(None, "--remote", help="Override the tracked remote when this branch is not already linked."),
+    branch: Optional[str] = typer.Option(None, "--branch", help="Override the tracked branch when this branch is not already linked."),
 ) -> None:
     try:
-        result = _actions().git_pull(remote=remote, branch=branch, rebase=rebase)
+        result = _actions().git_pull(remote=remote, branch=branch)
     except GitError as exc:
         console.print(app_panel(str(exc), "Pull Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
@@ -521,25 +521,17 @@ def git_pull(
 @git_app.command(
     "push",
     help=(
-        "Push a local branch to a chosen remote target, optionally setting upstream or using force-with-lease."
+        "Push the current branch to GitHub. DevAgent uses the tracked branch first and keeps the flow focused on the common case."
     ),
 )
 def git_push(
-    remote: str = typer.Option("origin", "--remote", help="Destination remote, for example `origin` or `upstream`."),
-    branch: Optional[str] = typer.Option(None, "--branch", help="Shorthand to use the same branch name locally and remotely."),
-    local_branch: Optional[str] = typer.Option(None, "--local-branch", help="Local branch to push. Defaults to the current branch."),
-    remote_branch: Optional[str] = typer.Option(None, "--remote-branch", help="Remote branch name to update. Defaults to the local branch name."),
-    set_upstream: bool = typer.Option(True, "--set-upstream/--no-set-upstream", help="Set the pushed remote branch as the upstream tracking branch."),
-    force_with_lease: bool = typer.Option(False, "--force-with-lease", help="Use `--force-with-lease` for safer history rewriting when you explicitly need it."),
+    remote: Optional[str] = typer.Option(None, "--remote", help="Override the tracked remote when this branch is not already linked."),
+    branch: Optional[str] = typer.Option(None, "--branch", help="Override the destination branch name. Defaults to the current branch."),
 ) -> None:
     try:
         result = _actions().git_push(
             remote=remote,
             branch=branch,
-            local_branch=local_branch,
-            remote_branch=remote_branch,
-            set_upstream=set_upstream,
-            force_with_lease=force_with_lease,
         )
     except GitError as exc:
         console.print(app_panel(str(exc), "Push Failed", tone="error", expand=False))
@@ -550,31 +542,25 @@ def git_push(
 @pr_app.command(
     "preview",
     help=(
-        "Preview a pull request title and body with explicit base/head repo and branch targeting."
+        "Preview the PR title and description for the current branch. DevAgent auto-detects the likely repo setup."
     ),
 )
 def pr_preview(
     base: str = typer.Option("main", "--base", help="Base branch for the pull request."),
-    base_repo: Optional[str] = typer.Option(None, "--base-repo", help="Base GitHub repo slug like `owner/repo`. Defaults to the current gh repo context."),
-    head_branch: Optional[str] = typer.Option(None, "--head-branch", help="Head branch to open the PR from. Defaults to the current branch."),
-    head_repo: Optional[str] = typer.Option(None, "--head-repo", help="Head GitHub repo slug like `owner/repo` when opening from a fork."),
     draft: bool = typer.Option(False, "--draft", help="Preview the PR as a draft flow."),
 ) -> None:
-    preview = _actions().pr_preview(base=base, base_repo=base_repo, head_branch=head_branch, head_repo=head_repo, draft=draft)
+    preview = _actions().pr_preview(base=base, draft=draft)
     console.print(pr_preview_renderable(preview))
 
 
 @pr_app.command(
     "create",
     help=(
-        "Create a pull request with explicit base/head repo and branch targeting, including fork-friendly flows."
+        "Open a PR for the current branch. DevAgent auto-detects the usual repo setup and keeps the flow simple."
     ),
 )
 def pr_create(
     base: str = typer.Option("main", "--base", help="Base branch for the pull request."),
-    base_repo: Optional[str] = typer.Option(None, "--base-repo", help="Base GitHub repo slug like `owner/repo`."),
-    head_branch: Optional[str] = typer.Option(None, "--head-branch", help="Head branch to use. Defaults to the current branch."),
-    head_repo: Optional[str] = typer.Option(None, "--head-repo", help="Head GitHub repo slug like `owner/repo` when opening from a fork."),
     title: Optional[str] = typer.Option(None, "--title", help="Override the generated PR title."),
     body: Optional[str] = typer.Option(None, "--body", help="Override the generated PR body."),
     draft: bool = typer.Option(False, "--draft", help="Create the pull request as a draft."),
@@ -582,9 +568,6 @@ def pr_create(
     try:
         url = _actions().pr_create(
             base=base,
-            base_repo=base_repo,
-            head_branch=head_branch,
-            head_repo=head_repo,
             title=title,
             body=body,
             draft=draft,

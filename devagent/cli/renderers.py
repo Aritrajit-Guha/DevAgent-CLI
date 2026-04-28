@@ -134,11 +134,10 @@ def commit_suggestion_renderable(suggestion: CommitSuggestion) -> RenderableType
     table.add_column("Section")
     table.add_column("Details")
     table.add_row("Subject", suggestion.subject)
-    table.add_row("Summary", "\n".join(f"- {line}" for line in suggestion.change_summary) or "none")
-    table.add_row("Impact", "\n".join(f"- {line}" for line in suggestion.impact_summary) or "none")
+    table.add_row("Project area", suggestion.project_area or "none")
     table.add_row("Key files", "\n".join(suggestion.changed_files[:5]) or "none")
-    if suggestion.body.strip():
-        table.add_row("Commit body", suggestion.body)
+    bullets = suggestion.body_bullets or suggestion.change_summary or suggestion.impact_summary
+    table.add_row("Preview", "\n".join(f"- {line}" for line in bullets) or "none")
     return table
 
 
@@ -146,10 +145,8 @@ def git_pull_summary_renderable(result: PullOutcome) -> RenderableType:
     table = app_table("Pull Summary")
     table.add_column("Field")
     table.add_column("Value")
-    table.add_row("Local branch", result.local_branch)
-    table.add_row("Remote", result.remote)
-    table.add_row("Remote branch", result.remote_branch)
-    table.add_row("Strategy", "rebase" if result.rebase else "merge")
+    table.add_row("Current branch", result.local_branch)
+    table.add_row("Pull from", f"{result.remote}/{result.remote_branch}")
     return table
 
 
@@ -157,11 +154,9 @@ def git_push_summary_renderable(result: PushOutcome) -> RenderableType:
     table = app_table("Push Summary")
     table.add_column("Field")
     table.add_column("Value")
-    table.add_row("Local branch", result.local_branch)
-    table.add_row("Destination remote", result.remote)
-    table.add_row("Destination branch", result.remote_branch)
-    table.add_row("Set upstream", "yes" if result.set_upstream else "no")
-    table.add_row("Force with lease", "yes" if result.force_with_lease else "no")
+    table.add_row("Current branch", result.local_branch)
+    table.add_row("Push to", f"{result.remote}/{result.remote_branch}")
+    table.add_row("Track this branch", "yes" if result.set_upstream else "already tracked")
     return table
 
 
@@ -169,6 +164,8 @@ def pr_preview_renderable(preview: PullRequestPreview) -> RenderableType:
     table = app_table("Pull Request Preview")
     table.add_column("Field")
     table.add_column("Value")
+    if getattr(preview, "summary", None):
+        table.add_row("Plan", preview.summary)
     table.add_row("Title", preview.title)
     table.add_row("Body", preview.body)
     return table

@@ -76,11 +76,11 @@ def git_menu_choices(*, merge_in_progress: bool) -> list[MenuChoice]:
         MenuChoice("Switch to another branch safely", "branch_switch"),
         MenuChoice("Commit with an auto-generated message", "commit_auto"),
         MenuChoice("Suggest a commit message without committing", "commit_suggest"),
-        MenuChoice("Pull a chosen remote branch into your current branch", "pull"),
-        MenuChoice("Push a chosen local branch to a remote target", "push"),
-        MenuChoice("Preview a pull request across repos and branches", "pr_preview"),
-        MenuChoice("Create a pull request across repos and branches", "pr_create"),
-        MenuChoice("Inspect the current merge and unresolved conflicts", "merge_conflicts"),
+        MenuChoice("Pull the latest changes into this branch", "pull"),
+        MenuChoice("Push this branch to GitHub", "push"),
+        MenuChoice("Preview the PR title and description", "pr_preview"),
+        MenuChoice("Open a PR for this branch", "pr_create"),
+        MenuChoice("Check merge conflicts", "merge_conflicts"),
     ]
     if merge_in_progress:
         choices.append(MenuChoice("Abort the current merge", "merge_abort"))
@@ -656,79 +656,81 @@ class AgentShell:
         return ShellResult("Pull Request Preview", f"TITLE\n{preview.title}\n\nBODY\n{preview.body}", "info")
 
     def pull_with_prompts(self) -> PullOutcome:
+        snapshot = self.actions.workspace_status()
+        current_branch = snapshot.branch or "current branch"
+        tracked = self.actions.git_upstream_for()
         remotes = self.actions.git_remotes()
-        remote = self.choose_named_value("Choose the remote to pull from", [item.name for item in remotes], default="origin")
-        branches = self.actions.git_remote_branches(remote)
-        default_branch = self.actions.git_upstream_for() or self.actions.workspace_status().branch or "main"
-        default_branch = default_branch.split("/", 1)[-1]
-        branch = self.choose_named_value("Choose the remote branch to pull", branches, default=default_branch, allow_custom=True)
-        rebase = Confirm.ask("Use rebase instead of merge for this pull?", default=False)
+        if tracked and "/" in tracked:
+            remote, branch = tracked.split("/", 1)
+        else:
+            remote = remotes[0].name if len(remotes) == 1 else self.choose_named_value(
+                "Choose the remote to pull from",
+                [item.name for item in remotes],
+                default=self.actions.git_tool.default_remote_name() or "origin",
+            )
+            branches = self.actions.git_remote_branches(remote)
+            branch = self.choose_named_value(
+                "Choose the branch to pull into this branch",
+                branches,
+                default=current_branch,
+                allow_custom=True,
+            )
         summary = PullOutcome(
-            local_branch=self.actions.workspace_status().branch or "current branch",
+            local_branch=current_branch,
             remote=remote,
             remote_branch=branch,
-            rebase=rebase,
         )
-        console.print(git_remotes_renderable(remotes))
+        if not tracked:
+            console.print(git_remotes_renderable(remotes))
         console.print(git_pull_summary_renderable(summary))
         if not Confirm.ask("Run this pull now?", default=True):
             raise RuntimeError("Pull cancelled.")
-        return self.actions.git_pull(remote=remote, branch=branch, rebase=rebase)
+        return self.actions.git_pull(remote=remote, branch=branch)
 
     def push_with_prompts(self) -> PushOutcome:
+        snapshot = self.actions.workspace_status()
+        current_branch = snapshot.branch or "current branch"
         remotes = self.actions.git_remotes()
-        remote = self.choose_named_value("Choose the destination remote", [item.name for item in remotes], default="origin")
-        local_branch = self.choose_named_value(
-            "Choose the local branch to push",
-            self.actions.git_local_branches(),
-            default=self.actions.workspace_status().branch or "main",
-            allow_custom=True,
-        )
-        upstream = self.actions.git_upstream_for(local_branch)
-        default_remote_branch = upstream.split("/", 1)[-1] if upstream and "/" in upstream else local_branch
-        remote_branch = self.choose_named_value(
-            "Choose the destination remote branch",
-            self.actions.git_remote_branches(remote),
-            default=default_remote_branch,
-            allow_custom=True,
-        )
-        set_upstream = Confirm.ask("Set this remote branch as upstream after pushing?", default=upstream is None)
-        force_with_lease = Confirm.ask("Use force-with-lease for this push?", default=False)
+        upstream = self.actions.git_upstream_for(current_branch)
+        if upstream and "/" in upstream:
+            remote, remote_branch = upstream.split("/", 1)
+            set_upstream = False
+        else:
+            remote = remotes[0].name if len(remotes) == 1 else self.choose_named_value(
+                "Choose where to publish this branch",
+                [item.name for item in remotes],
+                default=self.actions.git_tool.default_remote_name() or "origin",
+            )
+            remote_branch = Prompt.ask("Branch name to create on the remote", default=current_branch).strip() or current_branch
+            set_upstream = True
         summary = PushOutcome(
             remote=remote,
-            local_branch=local_branch,
+            local_branch=current_branch,
             remote_branch=remote_branch,
             set_upstream=set_upstream,
-            force_with_lease=force_with_lease,
         )
-        console.print(git_remotes_renderable(remotes))
+        if upstream is None:
+            console.print(git_remotes_renderable(remotes))
         console.print(git_push_summary_renderable(summary))
         if not Confirm.ask("Run this push now?", default=True):
             raise RuntimeError("Push cancelled.")
         return self.actions.git_push(
             remote=remote,
-            local_branch=local_branch,
+            local_branch=current_branch,
             remote_branch=remote_branch,
             set_upstream=set_upstream,
-            force_with_lease=force_with_lease,
         )
 
     def pr_preview_with_prompts(self, draft: bool | None = None, return_options: bool = False):
         remotes = self.actions.git_remotes()
-        console.print(git_remotes_renderable(remotes))
         default_base_remote = next((item for item in remotes if item.name == "upstream"), None) or next((item for item in remotes if item.name == "origin"), None)
         default_head_remote = next((item for item in remotes if item.name == "origin"), None) or default_base_remote
-        base_repo = self.choose_repo_slug("Choose the base repo", remotes, default_base_remote.repo_slug if default_base_remote else None)
-        base_remote_name = remote_name_for_repo(remotes, base_repo) or (default_base_remote.name if default_base_remote else "origin")
+        base_repo = default_base_remote.repo_slug if default_base_remote else None
+        head_repo = default_head_remote.repo_slug if default_head_remote else base_repo
+        base_remote_name = default_base_remote.name if default_base_remote else (self.actions.git_tool.default_remote_name() or "origin")
         base_branches = self.actions.git_remote_branches(base_remote_name)
-        base_branch = self.choose_named_value("Choose the base branch", base_branches, default="main", allow_custom=True)
-        head_repo = self.choose_repo_slug("Choose the head repo", remotes, default_head_remote.repo_slug if default_head_remote else base_repo)
-        head_branch = self.choose_named_value(
-            "Choose the head branch",
-            self.actions.git_local_branches(),
-            default=self.actions.workspace_status().branch or "main",
-            allow_custom=True,
-        )
+        base_branch = self.choose_named_value("Choose the branch to open this PR into", base_branches, default="main", allow_custom=True)
+        head_branch = self.actions.workspace_status().branch or "main"
         is_draft = Confirm.ask("Create or preview this as a draft PR?", default=False if draft is None else draft)
         preview = self.actions.pr_preview(
             base=base_branch,
