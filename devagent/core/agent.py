@@ -7,6 +7,7 @@ from devagent.context.indexer import CodeIndexer
 from devagent.context.retriever import Retriever
 from devagent.core.project import detect_project
 from devagent.core.session_store import SessionStore
+from devagent.core.structured_answers import answer_structured_question
 from devagent.tools.ai import AIClient
 
 
@@ -22,12 +23,22 @@ class RepoAgent:
     def answer(self, question: str, *, deep: bool = False, new_session: bool = False) -> str:
         if new_session:
             self.clear_session()
-        index = CodeIndexer(self.workspace).load_or_build()
-        intent = classify_intent(question)
-        queries = expand_queries(question, intent)
-        chunks = Retriever(index).search_hybrid(queries, limit=12 if deep else 8)
-        project = detect_project(self.workspace)
         session = self.sessions.load()
+        intent = classify_intent(question)
+        structured = answer_structured_question(
+            self.workspace,
+            question,
+            intent=intent,
+            conversation_hint=recent_user_context(session),
+        )
+        if structured:
+            self.sessions.append_exchange(question, structured.answer)
+            return structured.answer
+
+        index = CodeIndexer(self.workspace).load_or_build()
+        queries = expand_queries(question, intent)
+        chunks = Retriever(index).search_hybrid(queries, limit=12 if deep else 8, intent=intent)
+        project = detect_project(self.workspace)
         context = "\n\n".join(render_chunk(chunk) for chunk in chunks)
         relevant_files = summarize_files(chunks)
         if self.ai.available:
@@ -38,7 +49,8 @@ class RepoAgent:
                 "The user is on Windows. Do not suggest Unix-only commands such as cat, grep, or ls. "
                 "Prefer DevAgent commands first, such as `devagent workspace status`, `devagent index`, "
                 "`devagent packages`, `devagent inspect`, and `devagent run start`. "
-                "If context is incomplete, say exactly what is missing, note the ambiguity, and suggest one Windows-friendly next step."
+                "If context is incomplete, say exactly what is missing, note the ambiguity, and suggest one Windows-friendly next step. "
+                "Do not suggest `devagent inspect <file>` as a generic next step."
             )
             prompt = build_prompt(
                 question=question,
@@ -70,18 +82,20 @@ class RepoAgent:
         return fallback
 
 
-INTENT_PATTERNS = {
-    "dependency": re.compile(r"\b(package|dependency|dependencies|npm|pip|library|libraries)\b", re.IGNORECASE),
-    "security": re.compile(r"\b(secret|security|token|auth|vulnerab|jwt|api key)\b", re.IGNORECASE),
-    "debug": re.compile(r"\b(error|bug|issue|fail|failing|broken|debug|traceback)\b", re.IGNORECASE),
-    "find": re.compile(r"\b(where|find|locate|which file|which folder)\b", re.IGNORECASE),
-    "architecture": re.compile(r"\b(architecture|structure|project structure|how is .* organized|overview)\b", re.IGNORECASE),
-    "how-it-works": re.compile(r"\b(flow|how does|how do|what happens|implementation)\b", re.IGNORECASE),
-}
+INTENT_PATTERNS = (
+    ("count", re.compile(r"\b(how many|count|total number|number of)\b", re.IGNORECASE)),
+    ("dependency", re.compile(r"\b(package|dependency|dependencies|npm|pip|library|libraries|requirements)\b", re.IGNORECASE)),
+    ("security", re.compile(r"\b(secret|security|token|auth|vulnerab|jwt|api key)\b", re.IGNORECASE)),
+    ("debug", re.compile(r"\b(error|bug|issue|fail|failing|broken|debug|traceback)\b", re.IGNORECASE)),
+    ("find", re.compile(r"\b(where|find|locate|which file|which folder)\b", re.IGNORECASE)),
+    ("architecture", re.compile(r"\b(architecture|structure|project structure|how is .* organized|overview)\b", re.IGNORECASE)),
+    ("how-it-works", re.compile(r"\b(flow|how does|how do|what happens|implementation)\b", re.IGNORECASE)),
+    ("list", re.compile(r"\b(list|enumerate|show all|show me all|what are the names|name of the)\b", re.IGNORECASE)),
+)
 
 
 def classify_intent(question: str) -> str:
-    for intent, pattern in INTENT_PATTERNS.items():
+    for intent, pattern in INTENT_PATTERNS:
         if pattern.search(question):
             return intent
     if question.strip().casefold().startswith("explain"):
@@ -101,11 +115,13 @@ def expand_queries(question: str, intent: str) -> list[str]:
 
     intent_suffix = {
         "architecture": "project structure modules entrypoints data flow",
+        "count": "counts list totals full set collection values",
         "dependency": "package dependencies imports requirements package.json",
         "find": "file path module location implementation",
         "security": "auth token secret config environment",
         "debug": "error handling flow logs failing code path",
         "how-it-works": "request flow implementation control path",
+        "list": "full list names items entries catalogue records values",
         "explain": "module responsibilities key files",
     }.get(intent)
     if intent_suffix:
@@ -184,7 +200,9 @@ def build_prompt(*, question: str, intent: str, queries: list[str], project, ses
         "- Cite relevant files with line references like path:start-end.\n"
         "- Describe how pieces connect.\n"
         "- Call out ambiguity clearly.\n"
-        "- Suggest next repo-aware follow-ups only when useful.\n\n"
+        "- For list or count questions, give the exact count first and then enumerate the names/items explicitly when the repo context contains the full set.\n"
+        "- Suggest next repo-aware follow-ups only when useful.\n"
+        "- Do not suggest `devagent inspect <file>` unless there is genuinely missing repo context.\n\n"
         f"Repo context:\n{context or 'No indexed code chunks matched.'}\n\n"
         f"User question:\n{question}"
     )
@@ -207,3 +225,8 @@ def build_grounded_fallback(*, question: str, intent: str, project, session, chu
     else:
         lines.extend(["", "Best next step:", "Run `devagent index` and ask a more specific question about a file, route, module, or feature."])
     return "\n".join(lines)
+
+
+def recent_user_context(session) -> str:
+    recent_turns = [turn.content for turn in session.turns[-4:] if turn.role == "user"]
+    return " ".join([session.summary, *recent_turns]).strip()

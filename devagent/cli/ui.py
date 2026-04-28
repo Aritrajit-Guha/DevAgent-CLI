@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import re
+
 from rich import box
 from rich.console import Console, Group, RenderableType
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -44,6 +47,14 @@ _HEADER_STYLE = "bold #7dd3fc"
 _BORDER_STYLE = "#22d3ee"
 _ROW_STYLES = ("#dbeafe", "#cbd5e1")
 _PANEL_BACKGROUND = "on #06101d"
+_MARKDOWN_RE = (
+    r"(^#{1,6}\s+\S)|"
+    r"(^\s*(?:[-*+]|\d+\.)\s+\S)|"
+    r"(```)|"
+    r"(`[^`]+`)|"
+    r"(\*\*[^*]+\*\*)|"
+    r"(^>\s+\S)"
+)
 
 
 def brand_text(label: str = "DEVAGENT") -> Text:
@@ -114,3 +125,11 @@ def styled_path(value: str) -> Text:
 def toned_message(value: str, tone: str) -> Text:
     tone_style = _TONE_STYLES.get(tone, _TONE_STYLES["info"])
     return Text(value, style=tone_style)
+
+
+def render_chat_markdown(value: str) -> RenderableType:
+    if not value.strip():
+        return Text("")
+    if not re.search(_MARKDOWN_RE, value, re.MULTILINE):
+        return value
+    return Markdown(value, code_theme="monokai")

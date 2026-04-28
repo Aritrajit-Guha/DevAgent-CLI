@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from textwrap import dedent
 from typing import Optional
 
 import typer
@@ -8,29 +9,112 @@ from rich.prompt import Confirm, Prompt
 
 from devagent.cli.prompts import MenuChoice, can_use_arrow_menu, choose_directory, choose_menu_action
 from devagent.cli.renderers import (
+    commit_suggestion_renderable,
+    git_pull_summary_renderable,
+    git_push_summary_renderable,
     insights_renderable,
     merge_conflicts_renderable,
     packages_renderable,
+    pr_preview_renderable,
     run_inventory_renderable,
     run_launch_message,
     workspace_status_table,
 )
-from devagent.cli.ui import app_panel, app_table, console, hero_panel, status_badge, styled_path, toned_message
+from devagent.cli.ui import app_panel, app_table, console, hero_panel, render_chat_markdown, status_badge, styled_path, toned_message
 from devagent.config.settings import ConfigManager
 from devagent.core.actions import DevAgentActions, bind_workspace_action, snapshot_workspace
-from devagent.core.shell import AgentShell, interactive_terminal
+from devagent.core.shell import AgentShell, git_menu_choices, interactive_terminal
 from devagent.tools.git_tool import GitError
 
-app = typer.Typer(help="Local-first agentic AI developer assistant.", invoke_without_command=True, no_args_is_help=False)
-workspace_app = typer.Typer(help="Bind and inspect the active workspace.")
-setup_app = typer.Typer(help="Clone projects or publish local projects to GitHub.")
-new_app = typer.Typer(help="Guided onboarding flows for new or existing projects.")
-git_app = typer.Typer(help="Git workflow automation.", invoke_without_command=True)
-run_app = typer.Typer(help="Launch workspace services and save run phrases.", invoke_without_command=True)
-branch_app = typer.Typer(help="Branch helpers.")
-pr_app = typer.Typer(help="Pull request helpers.")
-merge_app = typer.Typer(help="Merge conflict helpers.")
-commit_app = typer.Typer(help="Commit message helpers.")
+APP_HELP = dedent(
+    """
+    Local-first agentic AI developer assistant.
+
+    Command families:
+    - `chat`: ask grounded repo questions with session memory and deep mode
+    - `git`: run guided Git, push, PR, and merge workflows
+    - `run`: launch local services and saved startup phrases
+    - `workspace` / `setup` / `new`: bind, clone, publish, and onboard projects
+    - `edit`, `inspect`, `watch`, `commit`: change code safely and keep the repo healthy
+
+    Typical flows:
+    - `devagent workspace bind D:\\MyProject`
+    - `devagent chat "Explain the auth flow"`
+    - `devagent git --help`
+    - `devagent run start --open-browser`
+
+    Tip: running `devagent` with no subcommand opens the interactive shell.
+    """
+).strip()
+
+WORKSPACE_HELP = dedent(
+    """
+    Bind, inspect, and re-check the active workspace.
+
+    Use this family when you want DevAgent to point at a different project,
+    verify what it detected, or inspect the current Git/project snapshot.
+    """
+).strip()
+
+SETUP_HELP = dedent(
+    """
+    Clone projects or publish local projects to GitHub.
+
+    Use `clone` for existing GitHub repos, `publish` for local work, or
+    `devagent new project` for the guided onboarding flow.
+    """
+).strip()
+
+NEW_HELP = dedent(
+    """
+    Guided onboarding flows for new or existing projects.
+
+    This is the friendlier setup surface when you want prompts instead of
+    remembering the exact clone or publish command.
+    """
+).strip()
+
+GIT_HELP = dedent(
+    """
+    Guided Git workflows for status, staging, commits, pulls, pushes, PRs, and merge recovery.
+
+    Common workflows:
+    - inspect repo state with `status`
+    - stage and commit with richer generated messages
+    - pull or push with explicit remote/branch targeting
+    - preview or create PRs across same-repo and fork setups
+    - inspect, abort, or continue merges with better context
+    """
+).strip()
+
+RUN_HELP = dedent(
+    """
+    Launch workspace services and manage saved run phrases.
+
+    Use this family to start detected stacks, open the browser, or save
+    natural-language startup shortcuts for repeated workflows.
+    """
+).strip()
+
+COMMIT_HELP = dedent(
+    """
+    Commit message helpers.
+
+    Use `suggest` to preview a detailed commit subject and body generated from
+    the actual files, symbols, and impact of your current changes.
+    """
+).strip()
+
+app = typer.Typer(help=APP_HELP, invoke_without_command=True, no_args_is_help=False)
+workspace_app = typer.Typer(help=WORKSPACE_HELP)
+setup_app = typer.Typer(help=SETUP_HELP)
+new_app = typer.Typer(help=NEW_HELP)
+git_app = typer.Typer(help=GIT_HELP, invoke_without_command=True)
+run_app = typer.Typer(help=RUN_HELP, invoke_without_command=True)
+branch_app = typer.Typer(help="Create and switch branches with safer guided flows.")
+pr_app = typer.Typer(help="Preview and create pull requests across repos and branches.")
+merge_app = typer.Typer(help="Inspect, abort, and continue merges with clearer conflict context.")
+commit_app = typer.Typer(help=COMMIT_HELP)
 
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(setup_app, name="setup")
@@ -96,81 +180,24 @@ def _print_git_menu() -> None:
     table.add_row("Switch to another branch safely", "devagent git branch switch <name>")
     table.add_row("Commit with an auto-generated message", "devagent git commit --all")
     table.add_row("Suggest a commit message without committing", "devagent commit suggest")
-    table.add_row("Pull the latest changes from the remote", "devagent git pull")
-    table.add_row("Push your current branch", "devagent git push")
-    table.add_row("Preview a pull request title and body", "devagent git pr preview")
-    table.add_row("Open a pull request with GitHub CLI", "devagent git pr create")
-    table.add_row("See which files are stuck in a conflict", "devagent git merge conflicts")
-    table.add_row("Abort a merge that went sideways", "devagent git merge abort")
-    table.add_row("Continue after resolving conflicts", "devagent git merge continue")
+    table.add_row("Pull a chosen remote branch into your current branch", "devagent git pull --remote upstream --branch main")
+    table.add_row("Push a chosen local branch to a remote target", "devagent git push --remote origin --local-branch feature --remote-branch feature")
+    table.add_row("Preview a pull request across repos and branches", "devagent git pr preview --base main --base-repo owner/repo --head-repo yourfork/repo")
+    table.add_row("Create a pull request across repos and branches", "devagent git pr create --base main --base-repo owner/repo --head-repo yourfork/repo")
+    table.add_row("Inspect the current merge and unresolved conflicts", "devagent git merge conflicts")
+    table.add_row("Abort the current merge", "devagent git merge abort")
+    table.add_row("Continue the current merge after resolution", "devagent git merge continue")
     console.print(table)
 
 
-def git_action_choices() -> list[MenuChoice]:
-    return [
-        MenuChoice("See what changed and which branch you're on", "status"),
-        MenuChoice("Stage everything for the next commit", "add_all"),
-        MenuChoice("Stage a specific file or folder", "add_path"),
-        MenuChoice("Create a branch for new work", "branch_create"),
-        MenuChoice("Switch to another branch safely", "branch_switch"),
-        MenuChoice("Commit with an auto-generated message", "commit_auto"),
-        MenuChoice("Suggest a commit message without committing", "commit_suggest"),
-        MenuChoice("Pull the latest changes from the remote", "pull"),
-        MenuChoice("Push your current branch", "push"),
-        MenuChoice("Preview a pull request title and body", "pr_preview"),
-        MenuChoice("Open a pull request with GitHub CLI", "pr_create"),
-        MenuChoice("See which files are stuck in a conflict", "merge_conflicts"),
-        MenuChoice("Abort a merge that went sideways", "merge_abort"),
-        MenuChoice("Continue after resolving conflicts", "merge_continue"),
-        MenuChoice("Exit Git assistant", "exit"),
-    ]
+def git_action_choices(merge_in_progress: bool = True) -> list[MenuChoice]:
+    choices = git_menu_choices(merge_in_progress=merge_in_progress)
+    return [choice for choice in choices if choice.value != "back"] + [MenuChoice("Exit Git assistant", "exit")]
 
 
 def _run_git_menu() -> None:
-    while True:
-        action = choose_menu_action(console, "Choose a Git action", git_action_choices())
-        if not action or action == "exit":
-            return
-        try:
-            if action == "status":
-                git_status()
-            elif action == "add_all":
-                git_add(".")
-            elif action == "add_path":
-                git_add(Prompt.ask("Path to stage", default="."))
-            elif action == "branch_create":
-                create_branch(Prompt.ask("New branch name"))
-            elif action == "branch_switch":
-                switch_branch(Prompt.ask("Branch to switch to"), force=Confirm.ask("Allow switching with uncommitted changes?", default=False))
-            elif action == "commit_auto":
-                custom = Confirm.ask("Write your own commit message?", default=False)
-                message = Prompt.ask("Commit message") if custom else None
-                git_commit(message=message, all_files=True)
-            elif action == "commit_suggest":
-                suggest_commit(conventional=True)
-            elif action == "pull":
-                git_pull(remote=Prompt.ask("Remote", default="origin"), branch=None, rebase=Confirm.ask("Pull with rebase?", default=False))
-            elif action == "push":
-                git_push(remote=Prompt.ask("Remote", default="origin"), branch=None)
-            elif action == "pr_preview":
-                pr_preview(base=Prompt.ask("Base branch", default="main"))
-            elif action == "pr_create":
-                pr_create(
-                    base=Prompt.ask("Base branch", default="main"),
-                    title=None,
-                    body=None,
-                    draft=Confirm.ask("Create this PR as a draft?", default=False),
-                )
-            elif action == "merge_conflicts":
-                merge_conflicts()
-            elif action == "merge_abort":
-                merge_abort()
-            elif action == "merge_continue":
-                merge_continue()
-        except typer.Exit:
-            continue
-        except Exception as exc:
-            console.print(app_panel(str(exc), "Git Action Failed", tone="error", expand=False))
+    shell = AgentShell(_workspace_path())
+    shell.git_mode()
 
 
 @git_app.callback()
@@ -285,21 +312,27 @@ def new_project(
     publish_repo(path=local_path, repo_name=repo_name, private=private, push=push)
 
 
-@app.command("index")
+@app.command("index", help="Scan the active workspace and refresh DevAgent's local code index for chat and edit workflows.")
 def index_workspace(path: Optional[Path] = typer.Option(None, "--path", "-p", help="Workspace path override.")) -> None:
     actions = _actions(path)
     count = actions.index_workspace()
     console.print(app_panel(f"Indexed {count} chunks from\n{actions.workspace}", "Index Complete", tone="success", expand=False))
 
 
-@app.command("chat")
+@app.command(
+    "chat",
+    help=(
+        "Ask a repo-aware question about the active workspace. "
+        "DevAgent retrieves relevant files, cites them, and can switch into deeper synthesis with `--deep`."
+    ),
+)
 def chat(
     question: str = typer.Argument(..., help="Question about the active workspace."),
     deep: bool = typer.Option(False, "--deep", help="Use broader retrieval and the deep Gemini model when configured."),
     new_session: bool = typer.Option(False, "--new-session", help="Clear saved workspace chat context before answering."),
 ) -> None:
     answer = _actions().chat(question, deep=deep, new_session=new_session)
-    console.print(app_panel(answer, "DevAgent Response", tone="info"))
+    console.print(app_panel(render_chat_markdown(answer), "DevAgent Response", tone="info"))
 
 
 @app.command("packages")
@@ -375,7 +408,10 @@ def run_forget(
     console.print(toned_message(f"Removed saved run phrase {phrase}.", "success"))
 
 
-@app.command("edit")
+@app.command(
+    "edit",
+    help="Describe a code change in plain English and review the generated diff before anything is applied.",
+)
 def edit(
     instruction: str = typer.Argument(..., help="Natural language code edit instruction."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Apply the proposed diff without prompting."),
@@ -397,7 +433,7 @@ def edit(
         console.print(toned_message("No files changed.", "warning"))
 
 
-@git_app.command("status")
+@git_app.command("status", help="Show the current branch and working-tree state in one place.")
 def git_status() -> None:
     try:
         status = _actions().git_status()
@@ -407,7 +443,7 @@ def git_status() -> None:
     console.print(app_panel(status, "Git Status", tone="info", expand=False))
 
 
-@git_app.command("add")
+@git_app.command("add", help="Stage either the whole workspace or a specific file/folder for the next commit.")
 def git_add(path: str = typer.Argument(".", help="Path to stage. Defaults to the whole workspace.")) -> None:
     try:
         _actions().git_add(path)
@@ -445,7 +481,12 @@ def switch_branch(
     console.print(toned_message(f"Switched to branch {name}.", "success"))
 
 
-@git_app.command("commit")
+@git_app.command(
+    "commit",
+    help=(
+        "Create a commit. When no manual message is provided, DevAgent generates a detailed subject and body from the real diff."
+    ),
+)
 def git_commit(
     message: Optional[str] = typer.Option(None, "--message", "-m", help="Commit message."),
     all_files: bool = typer.Option(True, "--all/--staged-only", "-a/-s", help="Stage all changed files before committing."),
@@ -458,45 +499,96 @@ def git_commit(
     console.print(app_panel(f"Created commit {outcome.commit_id}\n\n{outcome.message}", "Commit Complete", tone="success", expand=False))
 
 
-@git_app.command("pull")
+@git_app.command(
+    "pull",
+    help=(
+        "Pull from a chosen remote and branch, with an explicit merge or rebase strategy."
+    ),
+)
 def git_pull(
-    remote: str = "origin",
-    branch: Optional[str] = None,
-    rebase: bool = typer.Option(False, "--rebase", help="Pull with rebase instead of merge."),
+    remote: str = typer.Option("origin", "--remote", help="Remote to pull from, for example `origin` or `upstream`."),
+    branch: Optional[str] = typer.Option(None, "--branch", help="Remote branch to pull into the current local branch. Defaults to the current branch name."),
+    rebase: bool = typer.Option(False, "--rebase", help="Replay local commits on top of the pulled branch instead of creating a merge commit."),
 ) -> None:
     try:
-        current_branch = _actions().git_pull(remote=remote, branch=branch, rebase=rebase)
+        result = _actions().git_pull(remote=remote, branch=branch, rebase=rebase)
     except GitError as exc:
         console.print(app_panel(str(exc), "Pull Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
-    console.print(toned_message(f"Pulled {current_branch} from {remote}.", "success"))
+    console.print(git_pull_summary_renderable(result))
 
 
-@git_app.command("push")
-def git_push(remote: str = "origin", branch: Optional[str] = None) -> None:
+@git_app.command(
+    "push",
+    help=(
+        "Push a local branch to a chosen remote target, optionally setting upstream or using force-with-lease."
+    ),
+)
+def git_push(
+    remote: str = typer.Option("origin", "--remote", help="Destination remote, for example `origin` or `upstream`."),
+    branch: Optional[str] = typer.Option(None, "--branch", help="Shorthand to use the same branch name locally and remotely."),
+    local_branch: Optional[str] = typer.Option(None, "--local-branch", help="Local branch to push. Defaults to the current branch."),
+    remote_branch: Optional[str] = typer.Option(None, "--remote-branch", help="Remote branch name to update. Defaults to the local branch name."),
+    set_upstream: bool = typer.Option(True, "--set-upstream/--no-set-upstream", help="Set the pushed remote branch as the upstream tracking branch."),
+    force_with_lease: bool = typer.Option(False, "--force-with-lease", help="Use `--force-with-lease` for safer history rewriting when you explicitly need it."),
+) -> None:
     try:
-        target_branch = _actions().git_push(remote=remote, branch=branch)
+        result = _actions().git_push(
+            remote=remote,
+            branch=branch,
+            local_branch=local_branch,
+            remote_branch=remote_branch,
+            set_upstream=set_upstream,
+            force_with_lease=force_with_lease,
+        )
     except GitError as exc:
         console.print(app_panel(str(exc), "Push Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
-    console.print(toned_message(f"Pushed {target_branch} to {remote}.", "success"))
+    console.print(git_push_summary_renderable(result))
 
 
-@pr_app.command("preview")
-def pr_preview(base: str = typer.Option("main", "--base", help="Base branch for the pull request.")) -> None:
-    preview = _actions().pr_preview(base=base)
-    console.print(app_panel(f"TITLE\n{preview.title}\n\nBODY\n{preview.body}", "Pull Request Preview", tone="info"))
+@pr_app.command(
+    "preview",
+    help=(
+        "Preview a pull request title and body with explicit base/head repo and branch targeting."
+    ),
+)
+def pr_preview(
+    base: str = typer.Option("main", "--base", help="Base branch for the pull request."),
+    base_repo: Optional[str] = typer.Option(None, "--base-repo", help="Base GitHub repo slug like `owner/repo`. Defaults to the current gh repo context."),
+    head_branch: Optional[str] = typer.Option(None, "--head-branch", help="Head branch to open the PR from. Defaults to the current branch."),
+    head_repo: Optional[str] = typer.Option(None, "--head-repo", help="Head GitHub repo slug like `owner/repo` when opening from a fork."),
+    draft: bool = typer.Option(False, "--draft", help="Preview the PR as a draft flow."),
+) -> None:
+    preview = _actions().pr_preview(base=base, base_repo=base_repo, head_branch=head_branch, head_repo=head_repo, draft=draft)
+    console.print(pr_preview_renderable(preview))
 
 
-@pr_app.command("create")
+@pr_app.command(
+    "create",
+    help=(
+        "Create a pull request with explicit base/head repo and branch targeting, including fork-friendly flows."
+    ),
+)
 def pr_create(
     base: str = typer.Option("main", "--base", help="Base branch for the pull request."),
+    base_repo: Optional[str] = typer.Option(None, "--base-repo", help="Base GitHub repo slug like `owner/repo`."),
+    head_branch: Optional[str] = typer.Option(None, "--head-branch", help="Head branch to use. Defaults to the current branch."),
+    head_repo: Optional[str] = typer.Option(None, "--head-repo", help="Head GitHub repo slug like `owner/repo` when opening from a fork."),
     title: Optional[str] = typer.Option(None, "--title", help="Override the generated PR title."),
     body: Optional[str] = typer.Option(None, "--body", help="Override the generated PR body."),
     draft: bool = typer.Option(False, "--draft", help="Create the pull request as a draft."),
 ) -> None:
     try:
-        url = _actions().pr_create(base=base, title=title, body=body, draft=draft)
+        url = _actions().pr_create(
+            base=base,
+            base_repo=base_repo,
+            head_branch=head_branch,
+            head_repo=head_repo,
+            title=title,
+            body=body,
+            draft=draft,
+        )
     except GitError as exc:
         console.print(app_panel(str(exc), "PR Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
@@ -533,16 +625,21 @@ def merge_continue() -> None:
     console.print(toned_message("Continued the merge.", "success"))
 
 
-@commit_app.command("suggest")
+@commit_app.command(
+    "suggest",
+    help=(
+        "Preview a context-driven commit subject and body built from changed files, diff hunks, and likely project impact."
+    ),
+)
 def suggest_commit(conventional: bool = typer.Option(True, "--conventional/--plain")) -> None:
     try:
-        console.print(app_panel(_actions().suggest_commit(conventional=conventional), "Commit Suggestion", tone="info", expand=False))
+        console.print(commit_suggestion_renderable(_actions().suggest_commit(conventional=conventional)))
     except GitError as exc:
         console.print(app_panel(str(exc), "Commit Suggestion Failed", tone="error", expand=False))
         raise typer.Exit(code=1) from exc
 
 
-@app.command("watch")
+@app.command("watch", help="Watch the active workspace for file changes and print lightweight repo-aware prompts when things move.")
 def watch_workspace(
     interval: float = typer.Option(1.0, "--interval", help="Polling interval when watchdog is unavailable."),
 ) -> None:
@@ -551,7 +648,7 @@ def watch_workspace(
     actions.watch_workspace(interval=interval)
 
 
-@app.command("inspect")
+@app.command("inspect", help="Run DevAgent's lightweight safety and repo-hygiene checks against the active workspace.")
 def inspect_workspace() -> None:
     findings = _actions().inspect()
     renderable = insights_renderable(findings)

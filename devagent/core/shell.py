@@ -6,23 +6,28 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from rich.console import RenderableType
+from rich.console import Group, RenderableType
 from rich.prompt import Confirm, Prompt
 
 from devagent.cli.prompts import MenuChoice, choose_directory, choose_menu_action
 from devagent.cli.renderers import (
+    commit_suggestion_renderable,
+    git_pull_summary_renderable,
+    git_push_summary_renderable,
+    git_remotes_renderable,
     insight_lines,
     insights_renderable,
     merge_conflicts_renderable,
     package_lines,
     packages_renderable,
+    pr_preview_renderable,
     run_inventory_renderable,
     run_launch_message,
     workspace_status_table,
 )
-from devagent.cli.ui import app_panel, console, hero_panel
-from devagent.core.actions import DevAgentActions, PullRequestPreview, RunProfile, RunLaunchResult, WorkspaceSnapshot
-from devagent.tools.git_tool import GitError
+from devagent.cli.ui import app_panel, console, hero_panel, render_chat_markdown
+from devagent.core.actions import DevAgentActions, PullOutcome, PullRequestPreview, PushOutcome, RunProfile, RunLaunchResult, WorkspaceSnapshot
+from devagent.tools.git_tool import GitError, GitRemote
 
 
 @dataclass(frozen=True)
@@ -62,8 +67,8 @@ def home_menu_choices() -> list[MenuChoice]:
     ]
 
 
-def git_menu_choices() -> list[MenuChoice]:
-    return [
+def git_menu_choices(*, merge_in_progress: bool) -> list[MenuChoice]:
+    choices = [
         MenuChoice("See what changed and which branch you're on", "status"),
         MenuChoice("Stage everything for the next commit", "add_all"),
         MenuChoice("Stage a specific file or folder", "add_path"),
@@ -71,15 +76,17 @@ def git_menu_choices() -> list[MenuChoice]:
         MenuChoice("Switch to another branch safely", "branch_switch"),
         MenuChoice("Commit with an auto-generated message", "commit_auto"),
         MenuChoice("Suggest a commit message without committing", "commit_suggest"),
-        MenuChoice("Pull the latest changes from the remote", "pull"),
-        MenuChoice("Push your current branch", "push"),
-        MenuChoice("Preview a pull request title and body", "pr_preview"),
-        MenuChoice("Open a pull request with GitHub CLI", "pr_create"),
-        MenuChoice("See which files are stuck in a conflict", "merge_conflicts"),
-        MenuChoice("Abort a merge that went sideways", "merge_abort"),
-        MenuChoice("Continue after resolving conflicts", "merge_continue"),
-        MenuChoice("Back to home", "back"),
+        MenuChoice("Pull a chosen remote branch into your current branch", "pull"),
+        MenuChoice("Push a chosen local branch to a remote target", "push"),
+        MenuChoice("Preview a pull request across repos and branches", "pr_preview"),
+        MenuChoice("Create a pull request across repos and branches", "pr_create"),
+        MenuChoice("Inspect the current merge and unresolved conflicts", "merge_conflicts"),
     ]
+    if merge_in_progress:
+        choices.append(MenuChoice("Abort the current merge", "merge_abort"))
+        choices.append(MenuChoice("Continue the current merge after resolution", "merge_continue"))
+    choices.append(MenuChoice("Back to home", "back"))
+    return choices
 
 
 def run_menu_choices() -> list[MenuChoice]:
@@ -206,7 +213,7 @@ class AgentShell:
 
     def git_mode(self) -> None:
         while True:
-            action = choose_menu_action(console, "Git Mode", git_menu_choices())
+            action = choose_menu_action(console, "Git Mode", git_menu_choices(merge_in_progress=self.actions.git_merge_in_progress()))
             if not action or action == "back":
                 return
             try:
@@ -344,7 +351,7 @@ class AgentShell:
             return self.perform_git_intent(git_intent)
 
         answer = self.actions.chat(text, deep=self.deep_mode)
-        return ShellResult("DevAgent", answer, "info")
+        return ShellResult("DevAgent", render_chat_markdown(answer), "info")
 
     def handle_chat_input(self, raw_text: str) -> ShellResult | None:
         text = raw_text.strip()
@@ -356,7 +363,7 @@ class AgentShell:
         if matched_profile:
             return self.run_profile_result(matched_profile)
         answer = self.actions.chat(text, deep=self.deep_mode)
-        return ShellResult("DevAgent", answer, "info")
+        return ShellResult("DevAgent", render_chat_markdown(answer), "info")
 
     def handle_chat_command(self, text: str) -> ShellResult:
         command = text.strip().casefold()
@@ -578,26 +585,52 @@ class AgentShell:
             return ShellResult("Commit Complete", f"Created commit {outcome.commit_id}\n\n{outcome.message}", "success")
         if action == "commit_suggest":
             suggestion = self.actions.suggest_commit(conventional=True)
-            return ShellResult("Commit Suggestion", suggestion, "info")
+            return ShellResult("Commit Suggestion", commit_suggestion_renderable(suggestion), "info", use_panel=False)
         if action == "pull":
-            branch = self.actions.git_pull(remote="origin", branch=None, rebase=False)
-            return ShellResult("Pull Complete", f"Pulled {branch} from origin.", "success")
+            result = self.pull_with_prompts()
+            return ShellResult("Pull Complete", git_pull_summary_renderable(result), "success", use_panel=False)
         if action == "push":
-            branch = self.actions.git_push(remote="origin", branch=None)
-            return ShellResult("Push Complete", f"Pushed {branch} to origin.", "success")
+            result = self.push_with_prompts()
+            return ShellResult("Push Complete", git_push_summary_renderable(result), "success", use_panel=False)
         if action == "pr_preview":
-            preview = self.actions.pr_preview(base="main")
-            return self.pr_preview_result(preview)
+            preview = self.pr_preview_with_prompts(draft=False)
+            return ShellResult("Pull Request Preview", pr_preview_renderable(preview), "info", use_panel=False)
         if action == "pr_create":
-            url = self.actions.pr_create(base="main", title=None, body=None, draft=False)
+            preview, options = self.pr_preview_with_prompts(return_options=True)
+            console.print(pr_preview_renderable(preview))
+            if not Confirm.ask("Create this pull request now?", default=True):
+                return ShellResult("Pull Request", "Cancelled PR creation.", "warning")
+            url = self.actions.pr_create(
+                base=options["base_branch"],
+                base_repo=options["base_repo"],
+                head_branch=options["head_branch"],
+                head_repo=options["head_repo"],
+                title=preview.title,
+                body=preview.body,
+                draft=options["draft"],
+            )
             return ShellResult("Pull Request", url or "Pull request created.", "success")
         if action == "merge_conflicts":
             conflicts = self.actions.merge_conflicts()
-            return ShellResult("Merge Conflicts", merge_conflicts_renderable(conflicts), "info", use_panel=not conflicts)
+            merge_in_progress = self.actions.git_merge_in_progress()
+            if not conflicts and not merge_in_progress:
+                return ShellResult("Merge Conflicts", "No active merge conflicts or merge in progress.", "success")
+            return ShellResult(
+                "Merge Conflicts",
+                merge_conflict_status_renderable(conflicts, merge_in_progress=merge_in_progress),
+                "info",
+                use_panel=False,
+            )
         if action == "merge_abort":
+            if not self.actions.git_merge_in_progress():
+                return ShellResult("Merge Abort", "There is no active merge to abort.", "warning")
             self.actions.merge_abort()
             return ShellResult("Merge Abort", "Aborted the merge.", "success")
         if action == "merge_continue":
+            if not self.actions.git_merge_in_progress():
+                return ShellResult("Merge Continue", "There is no active merge to continue.", "warning")
+            if self.actions.merge_conflicts():
+                return ShellResult("Merge Continue", "Resolve all merge conflicts before continuing the merge.", "warning")
             self.actions.merge_continue()
             return ShellResult("Merge Continue", "Continued the merge.", "success")
         raise RuntimeError(f"Unknown Git action: {action}")
@@ -617,27 +650,137 @@ class AgentShell:
             message = Prompt.ask("Commit message") if custom else None
             outcome = self.actions.git_commit(message=message, all_files=True)
             return ShellResult("Commit Complete", f"Created commit {outcome.commit_id}\n\n{outcome.message}", "success")
-        if action == "pull":
-            remote = Prompt.ask("Remote", default="origin")
-            rebase = Confirm.ask("Pull with rebase?", default=False)
-            branch = self.actions.git_pull(remote=remote, branch=None, rebase=rebase)
-            return ShellResult("Pull Complete", f"Pulled {branch} from {remote}.", "success")
-        if action == "push":
-            remote = Prompt.ask("Remote", default="origin")
-            branch = self.actions.git_push(remote=remote, branch=None)
-            return ShellResult("Push Complete", f"Pushed {branch} to {remote}.", "success")
-        if action == "pr_preview":
-            preview = self.actions.pr_preview(base=Prompt.ask("Base branch", default="main"))
-            return self.pr_preview_result(preview)
-        if action == "pr_create":
-            base = Prompt.ask("Base branch", default="main")
-            draft = Confirm.ask("Create this PR as a draft?", default=False)
-            url = self.actions.pr_create(base=base, title=None, body=None, draft=draft)
-            return ShellResult("Pull Request", url or "Pull request created.", "success")
         return self.perform_git_intent(GitIntent(action=action))
 
     def pr_preview_result(self, preview: PullRequestPreview) -> ShellResult:
         return ShellResult("Pull Request Preview", f"TITLE\n{preview.title}\n\nBODY\n{preview.body}", "info")
+
+    def pull_with_prompts(self) -> PullOutcome:
+        remotes = self.actions.git_remotes()
+        remote = self.choose_named_value("Choose the remote to pull from", [item.name for item in remotes], default="origin")
+        branches = self.actions.git_remote_branches(remote)
+        default_branch = self.actions.git_upstream_for() or self.actions.workspace_status().branch or "main"
+        default_branch = default_branch.split("/", 1)[-1]
+        branch = self.choose_named_value("Choose the remote branch to pull", branches, default=default_branch, allow_custom=True)
+        rebase = Confirm.ask("Use rebase instead of merge for this pull?", default=False)
+        summary = PullOutcome(
+            local_branch=self.actions.workspace_status().branch or "current branch",
+            remote=remote,
+            remote_branch=branch,
+            rebase=rebase,
+        )
+        console.print(git_remotes_renderable(remotes))
+        console.print(git_pull_summary_renderable(summary))
+        if not Confirm.ask("Run this pull now?", default=True):
+            raise RuntimeError("Pull cancelled.")
+        return self.actions.git_pull(remote=remote, branch=branch, rebase=rebase)
+
+    def push_with_prompts(self) -> PushOutcome:
+        remotes = self.actions.git_remotes()
+        remote = self.choose_named_value("Choose the destination remote", [item.name for item in remotes], default="origin")
+        local_branch = self.choose_named_value(
+            "Choose the local branch to push",
+            self.actions.git_local_branches(),
+            default=self.actions.workspace_status().branch or "main",
+            allow_custom=True,
+        )
+        upstream = self.actions.git_upstream_for(local_branch)
+        default_remote_branch = upstream.split("/", 1)[-1] if upstream and "/" in upstream else local_branch
+        remote_branch = self.choose_named_value(
+            "Choose the destination remote branch",
+            self.actions.git_remote_branches(remote),
+            default=default_remote_branch,
+            allow_custom=True,
+        )
+        set_upstream = Confirm.ask("Set this remote branch as upstream after pushing?", default=upstream is None)
+        force_with_lease = Confirm.ask("Use force-with-lease for this push?", default=False)
+        summary = PushOutcome(
+            remote=remote,
+            local_branch=local_branch,
+            remote_branch=remote_branch,
+            set_upstream=set_upstream,
+            force_with_lease=force_with_lease,
+        )
+        console.print(git_remotes_renderable(remotes))
+        console.print(git_push_summary_renderable(summary))
+        if not Confirm.ask("Run this push now?", default=True):
+            raise RuntimeError("Push cancelled.")
+        return self.actions.git_push(
+            remote=remote,
+            local_branch=local_branch,
+            remote_branch=remote_branch,
+            set_upstream=set_upstream,
+            force_with_lease=force_with_lease,
+        )
+
+    def pr_preview_with_prompts(self, draft: bool | None = None, return_options: bool = False):
+        remotes = self.actions.git_remotes()
+        console.print(git_remotes_renderable(remotes))
+        default_base_remote = next((item for item in remotes if item.name == "upstream"), None) or next((item for item in remotes if item.name == "origin"), None)
+        default_head_remote = next((item for item in remotes if item.name == "origin"), None) or default_base_remote
+        base_repo = self.choose_repo_slug("Choose the base repo", remotes, default_base_remote.repo_slug if default_base_remote else None)
+        base_remote_name = remote_name_for_repo(remotes, base_repo) or (default_base_remote.name if default_base_remote else "origin")
+        base_branches = self.actions.git_remote_branches(base_remote_name)
+        base_branch = self.choose_named_value("Choose the base branch", base_branches, default="main", allow_custom=True)
+        head_repo = self.choose_repo_slug("Choose the head repo", remotes, default_head_remote.repo_slug if default_head_remote else base_repo)
+        head_branch = self.choose_named_value(
+            "Choose the head branch",
+            self.actions.git_local_branches(),
+            default=self.actions.workspace_status().branch or "main",
+            allow_custom=True,
+        )
+        is_draft = Confirm.ask("Create or preview this as a draft PR?", default=False if draft is None else draft)
+        preview = self.actions.pr_preview(
+            base=base_branch,
+            base_repo=base_repo,
+            head_branch=head_branch,
+            head_repo=head_repo,
+            draft=is_draft,
+        )
+        if return_options:
+            return preview, {
+                "base_repo": base_repo,
+                "base_branch": base_branch,
+                "head_repo": head_repo,
+                "head_branch": head_branch,
+                "draft": is_draft,
+            }
+        return preview
+
+    def choose_named_value(self, title: str, values: list[str], *, default: str, allow_custom: bool = False) -> str:
+        cleaned = [value for value in values if value]
+        if cleaned:
+            choices = [MenuChoice(value, value) for value in cleaned]
+            if allow_custom:
+                choices.append(MenuChoice("Type a custom value", "__custom__"))
+            picked = choose_menu_action(console, title, choices)
+            if allow_custom and picked == "__custom__":
+                return Prompt.ask(title, default=default).strip() or default
+            if picked:
+                return picked
+        if allow_custom:
+            return Prompt.ask(title, default=default).strip() or default
+        return default
+
+    def choose_repo_slug(self, title: str, remotes: list[GitRemote], default: str | None) -> str | None:
+        options = [remote.repo_slug for remote in remotes if remote.repo_slug]
+        unique = []
+        for option in options:
+            if option and option not in unique:
+                unique.append(option)
+        if unique:
+            choices = [MenuChoice(option, option) for option in unique]
+            choices.append(MenuChoice("Type a custom repo slug", "__custom__"))
+            picked = choose_menu_action(console, title, choices)
+            if picked == "__custom__":
+                value = Prompt.ask(title, default=default or "").strip()
+                return value or default
+            if picked:
+                return picked
+        if default:
+            value = Prompt.ask(title, default=default).strip()
+            return value or default
+        return None
 
 
 def packages_lines_or_table(packages, workspace: Path) -> RenderableType:
@@ -710,4 +853,21 @@ def infer_git_intent(text: str) -> GitIntent | None:
         return GitIntent("merge_abort")
     if "continue merge" in lowered:
         return GitIntent("merge_continue")
+    return None
+
+
+def merge_conflict_status_renderable(conflicts, *, merge_in_progress: bool) -> RenderableType:
+    if not conflicts:
+        status = "Merge is in progress and all conflict markers are resolved."
+        return Group(status, merge_conflicts_renderable(conflicts))
+    heading = "Merge is in progress." if merge_in_progress else "Conflict markers were detected."
+    return Group(heading, merge_conflicts_renderable(conflicts))
+
+
+def remote_name_for_repo(remotes: list[GitRemote], repo_slug: str | None) -> str | None:
+    if not repo_slug:
+        return None
+    for remote in remotes:
+        if remote.repo_slug == repo_slug:
+            return remote.name
     return None

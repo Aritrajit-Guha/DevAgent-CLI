@@ -3,8 +3,11 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from devagent.cli.main import app
+from devagent.core.actions import PullOutcome, PullRequestPreview, PushOutcome, WorkspaceSnapshot
 from devagent.core.agent import RepoAgent
-from devagent.core.shell import AgentShell, home_menu_choices, interactive_terminal
+from devagent.core.project import ProjectInfo
+from devagent.core.shell import AgentShell, GitIntent, home_menu_choices, interactive_terminal
+from devagent.tools.git_tool import GitRemote
 from devagent.tools.runtime_tool import LaunchSpec
 
 
@@ -183,6 +186,53 @@ def test_devagent_no_args_prints_help_when_not_interactive(monkeypatch) -> None:
     assert "Local-first agentic AI developer assistant." in result.stdout
 
 
+def test_devagent_help_catalogs_command_families(monkeypatch) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr("devagent.cli.main.interactive_terminal", lambda: False)
+
+    result = runner.invoke(app, ["--help"])
+
+    assert result.exit_code == 0
+    assert "Command families:" in result.stdout
+    assert "Tip: running `devagent` with no subcommand opens the interactive shell." in result.stdout
+    assert "devagent run start --open-browser" in result.stdout
+
+
+def test_git_help_catalog_is_richer(monkeypatch) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr("devagent.cli.main.interactive_terminal", lambda: False)
+
+    result = runner.invoke(app, ["git", "--help"])
+
+    assert result.exit_code == 0
+    assert "Guided Git workflows" in result.stdout
+    assert "Common workflows:" in result.stdout
+
+
+def test_chat_help_mentions_deep_and_session_flags(monkeypatch) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr("devagent.cli.main.interactive_terminal", lambda: False)
+
+    result = runner.invoke(app, ["chat", "--help"])
+
+    assert result.exit_code == 0
+    assert "--deep" in result.stdout
+    assert "--new-session" in result.stdout
+    assert "Ask a repo-aware question" in result.stdout
+
+
+def test_git_pull_help_shows_explicit_remote_and_branch_flags(monkeypatch) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr("devagent.cli.main.interactive_terminal", lambda: False)
+
+    result = runner.invoke(app, ["git", "pull", "--help"])
+
+    assert result.exit_code == 0
+    assert "--remote" in result.stdout
+    assert "--branch" in result.stdout
+    assert "Replay local commits on top of the pulled branch" in result.stdout
+
+
 def test_interactive_terminal_helper(monkeypatch) -> None:
     class FakeStream:
         def __init__(self, tty: bool):
@@ -194,3 +244,134 @@ def test_interactive_terminal_helper(monkeypatch) -> None:
     monkeypatch.setattr("devagent.core.shell.sys.stdin", FakeStream(True))
     monkeypatch.setattr("devagent.core.shell.sys.stdout", FakeStream(True))
     assert interactive_terminal() is True
+
+
+def test_shell_pull_wizard_captures_remote_branch_and_strategy(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    shell = AgentShell(workspace)
+
+    shell.actions.git_remotes = lambda: [
+        GitRemote("origin", "https://github.com/me/repo.git", "https://github.com/me/repo.git", "me/repo"),
+        GitRemote("upstream", "https://github.com/base/repo.git", "https://github.com/base/repo.git", "base/repo"),
+    ]
+    shell.actions.git_remote_branches = lambda remote: ["main", "release"] if remote == "upstream" else ["main"]
+    shell.actions.git_upstream_for = lambda branch=None: "upstream/main"
+    shell.actions.workspace_status = lambda: WorkspaceSnapshot(
+        project=ProjectInfo(path=workspace, project_types=["python"], package_files=[], file_tree=[]),
+        is_repo=True,
+        branch="feature/git-upgrade",
+        dirty=True,
+        changed_files=[" M devagent/core/shell.py"],
+    )
+    shell.actions.git_pull = lambda remote, branch, rebase: PullOutcome(
+        local_branch="feature/git-upgrade",
+        remote=remote,
+        remote_branch=branch or "main",
+        rebase=rebase,
+    )
+
+    picks = iter(["upstream", "release"])
+    shell.choose_named_value = lambda *args, **kwargs: next(picks)
+    confirms = iter([True, True])
+    monkeypatch.setattr("devagent.core.shell.Confirm.ask", lambda *args, **kwargs: next(confirms))
+
+    result = shell.pull_with_prompts()
+
+    assert result.remote == "upstream"
+    assert result.remote_branch == "release"
+    assert result.rebase is True
+
+
+def test_shell_push_wizard_captures_remote_targets_and_force_with_lease(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    shell = AgentShell(workspace)
+
+    shell.actions.git_remotes = lambda: [
+        GitRemote("origin", "https://github.com/me/repo.git", "https://github.com/me/repo.git", "me/repo"),
+    ]
+    shell.actions.git_remote_branches = lambda remote: ["main", "feature/git-upgrade"]
+    shell.actions.git_local_branches = lambda: ["main", "feature/git-upgrade"]
+    shell.actions.workspace_status = lambda: WorkspaceSnapshot(
+        project=ProjectInfo(path=workspace, project_types=["python"], package_files=[], file_tree=[]),
+        is_repo=True,
+        branch="feature/git-upgrade",
+        dirty=True,
+        changed_files=[" M devagent/cli/main.py"],
+    )
+    shell.actions.git_upstream_for = lambda branch=None: None
+    shell.actions.git_push = lambda **kwargs: PushOutcome(
+        remote=kwargs["remote"],
+        local_branch=kwargs["local_branch"],
+        remote_branch=kwargs["remote_branch"],
+        set_upstream=kwargs["set_upstream"],
+        force_with_lease=kwargs["force_with_lease"],
+    )
+
+    picks = iter(["origin", "feature/git-upgrade", "feature/git-upgrade"])
+    shell.choose_named_value = lambda *args, **kwargs: next(picks)
+    confirms = iter([True, True, True])
+    monkeypatch.setattr("devagent.core.shell.Confirm.ask", lambda *args, **kwargs: next(confirms))
+
+    result = shell.push_with_prompts()
+
+    assert result.remote == "origin"
+    assert result.local_branch == "feature/git-upgrade"
+    assert result.remote_branch == "feature/git-upgrade"
+    assert result.set_upstream is True
+    assert result.force_with_lease is True
+
+
+def test_shell_pr_wizard_handles_base_and_head_repo_choices(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    shell = AgentShell(workspace)
+
+    remotes = [
+        GitRemote("origin", "https://github.com/me/repo.git", "https://github.com/me/repo.git", "me/repo"),
+        GitRemote("upstream", "https://github.com/base/repo.git", "https://github.com/base/repo.git", "base/repo"),
+    ]
+    shell.actions.git_remotes = lambda: remotes
+    shell.actions.git_remote_branches = lambda remote: ["main", "release"]
+    shell.actions.git_local_branches = lambda: ["feature/git-upgrade", "main"]
+    shell.actions.workspace_status = lambda: WorkspaceSnapshot(
+        project=ProjectInfo(path=workspace, project_types=["python"], package_files=[], file_tree=[]),
+        is_repo=True,
+        branch="feature/git-upgrade",
+        dirty=True,
+        changed_files=[" M devagent/tools/git_tool.py"],
+    )
+    shell.actions.pr_preview = lambda **kwargs: PullRequestPreview(
+        title="feat: upgrade guided Git workflows",
+        body=f"Base {kwargs['base_repo']} -> Head {kwargs['head_repo']}",
+    )
+
+    repo_picks = iter(["base/repo", "me/repo"])
+    shell.choose_repo_slug = lambda *args, **kwargs: next(repo_picks)
+    value_picks = iter(["release", "feature/git-upgrade"])
+    shell.choose_named_value = lambda *args, **kwargs: next(value_picks)
+    monkeypatch.setattr("devagent.core.shell.Confirm.ask", lambda *args, **kwargs: True)
+
+    preview, options = shell.pr_preview_with_prompts(return_options=True)
+
+    assert preview.title == "feat: upgrade guided Git workflows"
+    assert options["base_repo"] == "base/repo"
+    assert options["base_branch"] == "release"
+    assert options["head_repo"] == "me/repo"
+    assert options["head_branch"] == "feature/git-upgrade"
+    assert options["draft"] is True
+
+
+def test_shell_merge_continue_is_blocked_when_conflicts_remain(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    shell = AgentShell(workspace)
+    shell.actions.git_merge_in_progress = lambda: True
+    shell.actions.merge_conflicts = lambda: [type("Conflict", (), {"path": "README.md", "markers": 1})()]
+
+    result = shell.perform_git_intent(GitIntent(action="merge_continue"))
+
+    assert result.title == "Merge Continue"
+    assert result.tone == "warning"
+    assert "Resolve all merge conflicts" in str(result.message)

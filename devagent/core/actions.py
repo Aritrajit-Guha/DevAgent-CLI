@@ -9,7 +9,15 @@ from devagent.context.indexer import CodeIndexer
 from devagent.core.agent import RepoAgent
 from devagent.core.project import ProjectInfo, detect_project
 from devagent.tools.edit_tool import EditAgent, EditProposal
-from devagent.tools.git_tool import GitError, GitTool
+from devagent.tools.git_tool import (
+    CommitSuggestion,
+    GitError,
+    GitRemote,
+    GitTool,
+    PullOptions,
+    PullRequestOptions,
+    PushOptions,
+)
 from devagent.tools.insights import Finding, Inspector
 from devagent.tools.node_tool import NodePackage, find_node_packages
 from devagent.tools.runtime_tool import LaunchSpec, RunProfile, RunTool
@@ -50,6 +58,23 @@ class CommitOutcome:
 class PullRequestPreview:
     title: str
     body: str
+
+
+@dataclass(frozen=True)
+class PullOutcome:
+    local_branch: str
+    remote: str
+    remote_branch: str
+    rebase: bool = False
+
+
+@dataclass(frozen=True)
+class PushOutcome:
+    remote: str
+    local_branch: str
+    remote_branch: str
+    set_upstream: bool = True
+    force_with_lease: bool = False
 
 
 @dataclass(frozen=True)
@@ -188,31 +213,87 @@ class DevAgentActions:
         self.git_tool.switch_branch(name)
 
     def git_commit(self, *, message: str | None = None, all_files: bool = True) -> CommitOutcome:
-        final_message = message or self.git_tool.suggest_commit_message()
-        commit_id = self.git_tool.commit(final_message, all_files=all_files)
+        suggestion = self.git_tool.suggest_commit() if message is None else message
+        commit_id = self.git_tool.commit(suggestion, all_files=all_files)
+        final_message = suggestion.full_message if isinstance(suggestion, CommitSuggestion) else suggestion
         return CommitOutcome(commit_id=commit_id, message=final_message)
 
-    def git_pull(self, *, remote: str = "origin", branch: str | None = None, rebase: bool = False) -> str:
-        self.git_tool.pull(remote=remote, branch=branch, rebase=rebase)
-        return branch or self.git_tool.current_branch() or "current branch"
+    def git_pull(self, *, remote: str = "origin", branch: str | None = None, rebase: bool = False) -> PullOutcome:
+        result = self.git_tool.pull(PullOptions(remote=remote, branch=branch or self.git_tool.current_branch() or "", rebase=rebase))
+        return PullOutcome(
+            local_branch=result.local_branch,
+            remote=result.remote,
+            remote_branch=result.remote_branch,
+            rebase=result.rebase,
+        )
 
-    def git_push(self, *, remote: str = "origin", branch: str | None = None) -> str:
-        target_branch = branch or self.git_tool.current_branch()
-        self.git_tool.push(remote=remote, branch=target_branch)
-        return target_branch or "current branch"
+    def git_push(
+        self,
+        *,
+        remote: str = "origin",
+        branch: str | None = None,
+        local_branch: str | None = None,
+        remote_branch: str | None = None,
+        set_upstream: bool = True,
+        force_with_lease: bool = False,
+    ) -> PushOutcome:
+        result = self.git_tool.push(
+            PushOptions(
+                remote=remote,
+                local_branch=local_branch or branch or self.git_tool.current_branch() or "",
+                remote_branch=remote_branch or branch or local_branch or self.git_tool.current_branch() or "",
+                set_upstream=set_upstream,
+                force_with_lease=force_with_lease,
+            )
+        )
+        return PushOutcome(
+            remote=result.remote,
+            local_branch=result.local_branch,
+            remote_branch=result.remote_branch,
+            set_upstream=result.set_upstream,
+            force_with_lease=result.force_with_lease,
+        )
 
-    def pr_preview(self, *, base: str = "main") -> PullRequestPreview:
-        return PullRequestPreview(title=self.git_tool.pr_title(), body=self.git_tool.pr_body(base=base))
+    def pr_preview(
+        self,
+        *,
+        base: str = "main",
+        base_repo: str | None = None,
+        head_branch: str | None = None,
+        head_repo: str | None = None,
+        draft: bool = False,
+    ) -> PullRequestPreview:
+        preview = self.git_tool.build_pr_preview(
+            PullRequestOptions(
+                base_repo=base_repo,
+                base_branch=base,
+                head_repo=head_repo,
+                head_branch=head_branch or self.git_tool.current_branch() or "current-branch",
+                draft=draft,
+            )
+        )
+        return PullRequestPreview(title=preview.subject, body=preview.body)
 
     def pr_create(
         self,
         *,
         base: str = "main",
+        base_repo: str | None = None,
+        head_branch: str | None = None,
+        head_repo: str | None = None,
         title: str | None = None,
         body: str | None = None,
         draft: bool = False,
     ) -> str:
-        return self.git_tool.create_pr(base=base, title=title, body=body, draft=draft)
+        return self.git_tool.create_pr(
+            base_branch=base,
+            base_repo=base_repo,
+            head_branch=head_branch,
+            head_repo=head_repo,
+            title=title,
+            body=body,
+            draft=draft,
+        )
 
     def merge_conflicts(self) -> list[MergeConflictDetail]:
         return [MergeConflictDetail(path=file, markers=self.git_tool.conflict_marker_count(file)) for file in self.git_tool.conflict_files()]
@@ -223,8 +304,26 @@ class DevAgentActions:
     def merge_continue(self) -> None:
         self.git_tool.merge_continue()
 
-    def suggest_commit(self, *, conventional: bool = True) -> str:
-        return self.git_tool.suggest_commit_message(conventional=conventional)
+    def suggest_commit(self, *, conventional: bool = True) -> CommitSuggestion:
+        return self.git_tool.suggest_commit(conventional=conventional)
+
+    def git_remotes(self) -> list[GitRemote]:
+        return self.git_tool.remotes()
+
+    def git_remote_names(self) -> list[str]:
+        return self.git_tool.remote_names()
+
+    def git_local_branches(self) -> list[str]:
+        return self.git_tool.local_branches()
+
+    def git_remote_branches(self, remote: str) -> list[str]:
+        return self.git_tool.remote_branches(remote)
+
+    def git_upstream_for(self, branch: str | None = None) -> str | None:
+        return self.git_tool.upstream_for(branch)
+
+    def git_merge_in_progress(self) -> bool:
+        return self.git_tool.merge_in_progress()
 
     def watch_workspace(self, *, interval: float = 1.0) -> None:
         WatchService(self.workspace, interval=interval).run()

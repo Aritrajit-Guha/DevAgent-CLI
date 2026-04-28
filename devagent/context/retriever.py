@@ -15,11 +15,16 @@ class Retriever:
     def __init__(self, index: CodeIndex):
         self.index = index
         self.ai = AIClient.from_env()
+        self.records_by_file: dict[str, list[CodeChunk]] = {}
+        for record in self.index.records:
+            self.records_by_file.setdefault(record.path, []).append(record)
+        for records in self.records_by_file.values():
+            records.sort(key=lambda item: item.start_line)
 
     def search(self, query: str, limit: int = 5) -> list[CodeChunk]:
         return self.search_hybrid([query], limit=limit)
 
-    def search_hybrid(self, queries: list[str], limit: int = 5) -> list[CodeChunk]:
+    def search_hybrid(self, queries: list[str], limit: int = 5, *, intent: str | None = None) -> list[CodeChunk]:
         normalized_queries = [query.strip() for query in queries if query and query.strip()]
         if not normalized_queries:
             return []
@@ -46,6 +51,8 @@ class Retriever:
                     hits_by_key[key] = SearchHit(record=record, score=scaled)
 
         ranked = sorted(hits_by_key.values(), key=lambda item: item.score, reverse=True)
+        if intent in {"count", "list", "enumerate"}:
+            return self._enumeration_slice(ranked, limit)
         return self._diverse_slice(ranked, limit)
 
     def _vector_scores(self, query_embedding: list[float]) -> dict[tuple[str, int, int], float]:
@@ -89,6 +96,58 @@ class Retriever:
                     break
                 selected.append(record)
         return selected
+
+    def _enumeration_slice(self, ranked_hits: list["SearchHit"], limit: int) -> list[CodeChunk]:
+        selected: list[CodeChunk] = []
+        seen: set[tuple[str, int, int]] = set()
+
+        for hit in ranked_hits:
+            if len(selected) >= max(3, limit // 2):
+                break
+            key = (hit.record.path, hit.record.start_line, hit.record.end_line)
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append(hit.record)
+
+        for seed in list(selected):
+            if len(selected) >= limit:
+                break
+            for neighbor in self._adjacent_records(seed):
+                key = (neighbor.path, neighbor.start_line, neighbor.end_line)
+                if key in seen:
+                    continue
+                seen.add(key)
+                selected.append(neighbor)
+                if len(selected) >= limit:
+                    break
+
+        if len(selected) < limit:
+            for hit in ranked_hits:
+                key = (hit.record.path, hit.record.start_line, hit.record.end_line)
+                if key in seen:
+                    continue
+                seen.add(key)
+                selected.append(hit.record)
+                if len(selected) >= limit:
+                    break
+        return selected
+
+    def _adjacent_records(self, record: CodeChunk) -> list[CodeChunk]:
+        records = self.records_by_file.get(record.path, [])
+        if not records:
+            return []
+        try:
+            index = records.index(record)
+        except ValueError:
+            return []
+
+        neighbors: list[CodeChunk] = []
+        if index > 0:
+            neighbors.append(records[index - 1])
+        if index + 1 < len(records):
+            neighbors.append(records[index + 1])
+        return neighbors
 
 
 @dataclass(frozen=True)
