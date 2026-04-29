@@ -8,7 +8,7 @@ from devagent.config.settings import AISettings, ConfigManager, ProviderModelCon
 from devagent.context.indexer import CodeIndexer
 from devagent.core.agent import RepoAgent
 from devagent.core.project import ProjectInfo, detect_project
-from devagent.tools.ai import AIClient, AIStatusSnapshot, DiscoveredModel
+from devagent.tools.ai import AIClient, AIStatusSnapshot, ProviderModelListing
 from devagent.tools.edit_tool import EditAgent, EditProposal
 from devagent.tools.git_tool import (
     CommitSuggestion,
@@ -93,6 +93,7 @@ class AISelectionResult:
     fast_model: str | None
     deep_model: str | None
     embedding_model: str | None
+    warnings: tuple[str, ...] = ()
 
 
 def validate_workspace_path(path: Path) -> Path:
@@ -156,14 +157,13 @@ class DevAgentActions:
     def ai_status(self, *, refresh: bool = False) -> AIStatusSnapshot:
         return AIClient.from_env().provider_status(refresh=refresh)
 
-    def ai_models(self, *, provider: str | None = None, refresh: bool = False) -> dict[str, list[DiscoveredModel]]:
+    def ai_models(self, *, provider: str | None = None, refresh: bool = False) -> list[ProviderModelListing]:
         client = AIClient.from_env()
         if provider:
-            return {provider: client.list_models(provider=provider, refresh=refresh)}
-        return {
-            name: client.list_models(provider=name, refresh=refresh)
-            for name in client.available_providers
-        }
+            if provider not in client.available_providers:
+                return [ProviderModelListing(provider=provider, error=f"Provider `{provider}` is not currently configured.")]
+            return [client.list_models_safe(provider=provider, refresh=refresh)]
+        return [client.list_models_safe(provider=name, refresh=refresh) for name in client.available_providers]
 
     def save_ai_selection(
         self,

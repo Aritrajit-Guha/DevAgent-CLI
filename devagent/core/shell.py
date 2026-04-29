@@ -482,10 +482,10 @@ class AgentShell:
         return ShellResult("AI Status", ai_status_renderable(self.actions.ai_status()), "info", use_panel=False)
 
     def ai_models_result(self, provider: str | None = None) -> ShellResult:
-        models_by_provider = self.actions.ai_models(provider=provider, refresh=True)
-        if not models_by_provider:
+        listings = self.actions.ai_models(provider=provider, refresh=True)
+        if not listings:
             return ShellResult("AI Models", "No AI providers are configured yet. Add a supported API key first.", "warning")
-        renderables = [ai_models_renderable(name, models) for name, models in models_by_provider.items()]
+        renderables = [ai_models_renderable(listing) for listing in listings]
         return ShellResult("AI Models", Group(*renderables), "info", use_panel=False)
 
     def workspace_status_result(self) -> ShellResult:
@@ -524,7 +524,10 @@ class AgentShell:
             return ShellResult("AI Models", "No AI providers are configured yet. Add a supported API key first.", "warning")
         default_provider = status.selected_provider or provider_names[0]
         provider = self.choose_named_value("Choose the provider to configure", provider_names, default=default_provider)
-        models = self.actions.ai_models(provider=provider, refresh=True).get(provider, [])
+        listing = self.actions.ai_models(provider=provider, refresh=True)[0]
+        if listing.error:
+            return ShellResult("AI Models", f"Could not load the visible models for {provider} right now.\n\n{listing.error}", "warning")
+        models = list(listing.models)
         if kind == "embed":
             models = [model for model in models if "embed" in model.capabilities]
             if not models:

@@ -3,11 +3,12 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from devagent.cli.main import app
+from devagent.config.settings import ConfigManager
 from devagent.core.actions import AISelectionResult, PullOutcome, PullRequestPreview, PushOutcome, WorkspaceSnapshot
 from devagent.core.agent import RepoAgent
 from devagent.core.project import ProjectInfo
 from devagent.core.shell import AgentShell, GitIntent, home_menu_choices, interactive_terminal
-from devagent.tools.ai import AIProviderStatus, AIStatusSnapshot
+from devagent.tools.ai import AIProviderStatus, AIStatusSnapshot, DiscoveredModel, ProviderModelListing
 from devagent.tools.git_tool import GitRemote
 from devagent.tools.runtime_tool import LaunchSpec
 from devagent.tools.setup_tool import SetupResult
@@ -315,6 +316,98 @@ def test_ai_status_command_renders_without_a_bound_workspace(monkeypatch) -> Non
     assert "grok-3-mini" in result.stdout
 
 
+def test_ai_models_command_renders_partial_success(monkeypatch) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr("devagent.cli.main.interactive_terminal", lambda: False)
+
+    class FakeActions:
+        def ai_models(self, provider=None, refresh=False):
+            return [
+                ProviderModelListing(
+                    provider="gemini",
+                    models=(
+                        DiscoveredModel("gemini", "gemini-2.5-flash", "Gemini 2.5 Flash", ("generate",)),
+                    ),
+                ),
+                ProviderModelListing(
+                    provider="xai",
+                    error="HTTP 403 Forbidden: Your newly created team doesn't have any credits or licenses yet.",
+                ),
+            ]
+
+    monkeypatch.setattr("devagent.cli.main._ai_actions", lambda: FakeActions())
+
+    result = runner.invoke(app, ["ai", "models"])
+
+    assert result.exit_code == 0
+    assert "gemini Models" in result.stdout
+    assert "gemini-2.5-flash" in result.stdout
+    assert "xai Models" in result.stdout
+    assert "credits or licenses yet" in result.stdout
+
+
+def test_ai_models_command_shows_provider_specific_failure_for_broken_provider(monkeypatch) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr("devagent.cli.main.interactive_terminal", lambda: False)
+
+    class FakeActions:
+        def ai_models(self, provider=None, refresh=False):
+            return [
+                ProviderModelListing(
+                    provider="xai",
+                    error="HTTP 403 Forbidden: Your newly created team doesn't have any credits or licenses yet.",
+                ),
+            ]
+
+    monkeypatch.setattr("devagent.cli.main._ai_actions", lambda: FakeActions())
+
+    result = runner.invoke(app, ["ai", "models", "--provider", "xai"])
+
+    assert result.exit_code == 1
+    assert "DevAgent could not load live models" in result.stdout
+    assert "credits or licenses yet" in result.stdout
+
+
+def test_ai_use_provider_only_saves_when_discovery_is_unavailable(monkeypatch) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr("devagent.cli.main.interactive_terminal", lambda: False)
+    calls: list[str] = []
+
+    class FakeActions:
+        def ai_status(self, refresh=False):
+            return AIStatusSnapshot(
+                selected_provider="gemini",
+                fast_model="gemini-2.5-flash",
+                deep_model="gemini-2.5-pro",
+                embedding_model="gemini-embedding-001",
+                providers=(
+                    AIProviderStatus("gemini", "GEMINI_API_KEY", True, generation_models=2, embedding_models=1),
+                    AIProviderStatus("xai", "XAI_API_KEY", False, generation_models=0, embedding_models=0, error="HTTP 403 Forbidden"),
+                ),
+            )
+
+        def ai_models(self, provider=None, refresh=False):
+            return [ProviderModelListing(provider="xai", error="HTTP 403 Forbidden: Your newly created team doesn't have any credits or licenses yet.")]
+
+        def save_ai_selection(self, **kwargs):
+            calls.append(kwargs["provider"])
+            return AISelectionResult(
+                provider=kwargs["provider"],
+                fast_model="grok-3-mini",
+                deep_model="grok-3-mini",
+                embedding_model=None,
+            )
+
+    monkeypatch.setattr("devagent.cli.main._ai_actions", lambda: FakeActions())
+
+    result = runner.invoke(app, ["ai", "use", "--provider", "xai"])
+
+    assert result.exit_code == 0
+    assert calls == ["xai"]
+    assert "AI Selection Saved" in result.stdout
+    assert "grok-3-mini" in result.stdout
+
+
 def test_git_pull_help_shows_explicit_remote_and_branch_flags(monkeypatch) -> None:
     runner = CliRunner()
     monkeypatch.setattr("devagent.cli.main.interactive_terminal", lambda: False)
@@ -406,6 +499,72 @@ def test_shell_can_save_ai_provider_selection(tmp_path: Path) -> None:
     assert result.title == "AI Selection Saved"
     assert result.use_panel is False
     assert calls == ["xai"]
+
+
+def test_devagent_no_args_with_missing_bound_workspace_shows_recovery(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_dir = tmp_path / "config-home"
+    missing = tmp_path / "missing-workspace"
+    monkeypatch.setenv("DEVAGENT_CONFIG_DIR", str(config_dir))
+    ConfigManager.bind_workspace(missing)
+    monkeypatch.setattr("devagent.cli.main.interactive_terminal", lambda: True)
+    launched: list[Path] = []
+    monkeypatch.setattr("devagent.cli.main.AgentShell", lambda path: launched.append(path))
+
+    result = runner.invoke(app, [])
+
+    assert result.exit_code == 0
+    assert not launched
+    assert "The saved workspace path no longer exists" in result.stdout
+    assert "devagent workspace bind <path>" in result.stdout
+
+
+def test_workspace_status_with_missing_bound_workspace_shows_actionable_error(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_dir = tmp_path / "config-home"
+    missing = tmp_path / "missing-workspace"
+    monkeypatch.setenv("DEVAGENT_CONFIG_DIR", str(config_dir))
+    ConfigManager.bind_workspace(missing)
+    monkeypatch.setattr("devagent.cli.main.interactive_terminal", lambda: False)
+
+    result = runner.invoke(app, ["workspace", "status"])
+
+    assert result.exit_code != 0
+    assert "The saved workspace path no longer exists" in result.stdout
+    assert "devagent workspace bind <path>" in result.stdout
+
+
+def test_ai_status_still_works_when_saved_workspace_path_is_missing(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_dir = tmp_path / "config-home"
+    missing = tmp_path / "missing-workspace"
+    monkeypatch.setenv("DEVAGENT_CONFIG_DIR", str(config_dir))
+    ConfigManager.bind_workspace(missing)
+    monkeypatch.setattr("devagent.cli.main.interactive_terminal", lambda: False)
+    captured: list[Path] = []
+
+    class FakeActions:
+        def __init__(self, workspace):
+            captured.append(Path(workspace))
+
+        def ai_status(self, refresh=False):
+            return AIStatusSnapshot(
+                selected_provider="gemini",
+                fast_model="gemini-2.5-flash",
+                deep_model="gemini-2.5-pro",
+                embedding_model="gemini-embedding-001",
+                providers=(
+                    AIProviderStatus("gemini", "GEMINI_API_KEY", True, generation_models=2, embedding_models=1),
+                ),
+            )
+
+    monkeypatch.setattr("devagent.cli.main.DevAgentActions", FakeActions)
+
+    result = runner.invoke(app, ["ai", "status"])
+
+    assert result.exit_code == 0
+    assert captured == [Path.cwd()]
+    assert "gemini-2.5-flash" in result.stdout
 
 
 def test_shell_pull_wizard_asks_only_for_remote_and_branch_when_untracked(tmp_path: Path, monkeypatch) -> None:

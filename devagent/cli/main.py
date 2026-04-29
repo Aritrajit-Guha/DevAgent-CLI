@@ -150,12 +150,16 @@ def app_callback(ctx: typer.Context) -> None:
     if ctx.invoked_subcommand is not None:
         return
     if interactive_terminal():
-        config = ConfigManager.load()
-        if not config.workspace_path:
+        state, bound_path = _bound_workspace_state()
+        if state == "unbound":
             console.print(app_panel("No workspace is bound yet.\nRun `devagent workspace bind <path>` or `devagent new project` first.", "Agent Shell", tone="warning", expand=False))
             console.print(ctx.get_help())
             raise typer.Exit()
-        shell = AgentShell(config.workspace_path)
+        if state == "missing":
+            console.print(app_panel(_missing_workspace_message(bound_path), "Workspace Missing", tone="warning", expand=False))
+            console.print(ctx.get_help())
+            raise typer.Exit()
+        shell = AgentShell(bound_path)
         shell.run()
         raise typer.Exit()
     console.print(ctx.get_help())
@@ -164,11 +168,16 @@ def app_callback(ctx: typer.Context) -> None:
 
 def _workspace_path(explicit: Optional[Path] = None) -> Path:
     if explicit:
-        return explicit.expanduser().resolve()
-    config = ConfigManager.load()
-    if not config.workspace_path:
+        resolved = explicit.expanduser().resolve()
+        if not resolved.exists() or not resolved.is_dir():
+            raise typer.BadParameter(f"Workspace does not exist or is not a directory: {resolved}")
+        return resolved
+    state, bound_path = _bound_workspace_state()
+    if state == "unbound":
         raise typer.BadParameter("No workspace is bound. Run `devagent workspace bind <path>` first.")
-    return config.workspace_path
+    if state == "missing":
+        raise typer.BadParameter(_missing_workspace_message(bound_path))
+    return bound_path
 
 
 def _print_project_status(path: Path) -> None:
@@ -180,8 +189,38 @@ def _actions(explicit: Optional[Path] = None) -> DevAgentActions:
 
 
 def _ai_actions() -> DevAgentActions:
+    state, workspace = _bound_workspace_state()
+    if state == "ready" and workspace is not None:
+        return DevAgentActions(workspace)
+    return DevAgentActions(Path.cwd())
+
+
+def _setup_actions() -> DevAgentActions:
+    state, workspace = _bound_workspace_state()
+    if state == "ready" and workspace is not None:
+        return DevAgentActions(workspace)
+    return DevAgentActions(Path.cwd())
+
+
+def _bound_workspace_state() -> tuple[str, Path | None]:
     config = ConfigManager.load()
-    return DevAgentActions(config.workspace_path or Path.cwd())
+    if not config.workspace_path:
+        return "unbound", None
+    bound_path = config.workspace_path.expanduser().resolve()
+    if not bound_path.exists() or not bound_path.is_dir():
+        return "missing", bound_path
+    return "ready", bound_path
+
+
+def _missing_workspace_message(path: Path | None) -> str:
+    missing_path = str(path) if path else "unknown path"
+    return (
+        f"The saved workspace path no longer exists:\n{missing_path}\n\n"
+        "Use one of these to recover:\n"
+        "- `devagent workspace bind <path>`\n"
+        "- `devagent new project`\n"
+        "- `devagent setup clone <repo-url>`"
+    )
 
 
 def _print_run_menu() -> None:
@@ -254,14 +293,18 @@ def ai_models(
     provider: Optional[str] = typer.Option(None, "--provider", help="Limit the model list to one provider, such as `gemini` or `xai`."),
     refresh: bool = typer.Option(False, "--refresh", help="Refresh visible model data before listing models."),
 ) -> None:
-    models_by_provider = _ai_actions().ai_models(provider=provider, refresh=refresh)
-    if not models_by_provider:
+    listings = _ai_actions().ai_models(provider=provider, refresh=refresh)
+    if not listings:
         console.print(app_panel("No AI providers are configured yet. Add a supported API key first.", "AI Models", tone="warning", expand=False))
         raise typer.Exit(code=1)
-    for index, (name, models) in enumerate(models_by_provider.items()):
+    if all(listing.error and not listing.models for listing in listings):
+        details = "\n".join(f"- {listing.label}: {listing.error}" for listing in listings)
+        console.print(app_panel(f"DevAgent could not load live models for the requested provider(s).\n\n{details}", "AI Models", tone="warning", expand=False))
+        raise typer.Exit(code=1)
+    for index, listing in enumerate(listings):
         if index:
             console.print()
-        console.print(ai_models_renderable(name, models))
+        console.print(ai_models_renderable(listing))
 
 
 @ai_app.command("use", help="Save the default provider and model selection DevAgent should use for chat, edit, and other AI-powered flows.")
@@ -282,18 +325,29 @@ def ai_use(
     if chosen_provider not in configured:
         raise typer.BadParameter(f"Provider `{chosen_provider}` is not currently configured.")
 
-    visible_models = actions.ai_models(provider=chosen_provider, refresh=True).get(chosen_provider, [])
-    generation_ids = {item.id for item in visible_models if "generate" in item.capabilities}
-    embedding_ids = {item.id for item in visible_models if "embed" in item.capabilities}
+    listing = actions.ai_models(provider=chosen_provider, refresh=True)[0]
+    generation_ids = {item.id for item in listing.models if "generate" in item.capabilities}
+    embedding_ids = {item.id for item in listing.models if "embed" in item.capabilities}
+    deferred_validation_warning: str | None = None
 
-    if model and generation_ids and model not in generation_ids:
-        raise typer.BadParameter(f"Model `{model}` is not visible for provider `{chosen_provider}`.")
-    if deep_model and generation_ids and deep_model not in generation_ids:
-        raise typer.BadParameter(f"Deep model `{deep_model}` is not visible for provider `{chosen_provider}`.")
-    if embedding_model and embedding_ids and embedding_model not in embedding_ids:
-        raise typer.BadParameter(f"Embedding model `{embedding_model}` is not visible for provider `{chosen_provider}`.")
-    if embedding_model and not embedding_ids:
+    if chosen_provider != "gemini" and embedding_model:
         raise typer.BadParameter(f"Provider `{chosen_provider}` does not currently expose embedding models in DevAgent.")
+
+    if listing.error:
+        if model or deep_model or embedding_model:
+            deferred_validation_warning = (
+                f"Could not verify the visible models for {chosen_provider} right now. "
+                f"Saved the explicit model values as provided. {listing.error}"
+            )
+    else:
+        if model and generation_ids and model not in generation_ids:
+            raise typer.BadParameter(f"Model `{model}` is not visible for provider `{chosen_provider}`.")
+        if deep_model and generation_ids and deep_model not in generation_ids:
+            raise typer.BadParameter(f"Deep model `{deep_model}` is not visible for provider `{chosen_provider}`.")
+        if embedding_model and embedding_ids and embedding_model not in embedding_ids:
+            raise typer.BadParameter(f"Embedding model `{embedding_model}` is not visible for provider `{chosen_provider}`.")
+        if embedding_model and not embedding_ids:
+            raise typer.BadParameter(f"Provider `{chosen_provider}` does not currently expose embedding models in DevAgent.")
 
     selection = actions.save_ai_selection(
         provider=chosen_provider,
@@ -301,6 +355,14 @@ def ai_use(
         deep_model=deep_model,
         embedding_model=embedding_model,
     )
+    if deferred_validation_warning:
+        selection = type(selection)(
+            provider=selection.provider,
+            fast_model=selection.fast_model,
+            deep_model=selection.deep_model,
+            embedding_model=selection.embedding_model,
+            warnings=(deferred_validation_warning,),
+        )
     console.print(ai_selection_renderable(selection))
 
 
@@ -333,7 +395,7 @@ def clone_repo(
     install_deps: bool = typer.Option(False, "--install-deps", help="Install detected dependencies after clone."),
     open_code: bool = typer.Option(False, "--open-code", help="Open the cloned project in VS Code."),
 ) -> None:
-    actions = DevAgentActions(_workspace_path() if ConfigManager.load().workspace_path else Path.cwd())
+    actions = _setup_actions()
     try:
         result = actions.clone_repo(repo_url, target=target, install_deps=install_deps, open_code=open_code)
     except (RuntimeError, ValueError) as exc:
@@ -361,7 +423,7 @@ def publish_repo(
     private: bool = typer.Option(False, "--private", help="Create a private GitHub repository."),
     push: bool = typer.Option(True, "--push/--no-push", help="Push after creating the remote repository."),
 ) -> None:
-    actions = DevAgentActions(_workspace_path() if ConfigManager.load().workspace_path else Path.cwd())
+    actions = _setup_actions()
     try:
         result = actions.publish_repo(path, repo_name=repo_name, private=private, push=push)
     except (RuntimeError, ValueError) as exc:

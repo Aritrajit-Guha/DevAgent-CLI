@@ -51,6 +51,18 @@ class AIProviderStatus:
     selected: bool
     generation_models: int = 0
     embedding_models: int = 0
+    error: str | None = None
+
+    @property
+    def label(self) -> str:
+        return PROVIDER_LABELS.get(self.provider, self.provider)
+
+
+@dataclass(frozen=True)
+class ProviderModelListing:
+    provider: str
+    models: tuple[DiscoveredModel, ...] = ()
+    error: str | None = None
 
     @property
     def label(self) -> str:
@@ -177,7 +189,10 @@ class AIClient:
         provider_rows: list[AIProviderStatus] = []
 
         for provider in self.available_providers:
-            models = self.list_models(provider=provider, refresh=refresh)
+            listing = self.list_models_safe(provider=provider, refresh=refresh)
+            models = list(listing.models)
+            if listing.error:
+                warnings.append(f"{listing.label}: {listing.error}")
             provider_rows.append(
                 AIProviderStatus(
                     provider=provider,
@@ -185,6 +200,7 @@ class AIClient:
                     selected=provider == self.provider,
                     generation_models=sum(1 for model in models if model.supports(GENERATION_CAPABILITY)),
                     embedding_models=sum(1 for model in models if model.supports(EMBED_CAPABILITY)),
+                    error=listing.error,
                 )
             )
 
@@ -193,19 +209,41 @@ class AIClient:
         embedding_model = self.embedding_model
 
         if self.provider:
-            generation_ids = {model.id for model in self.list_models(provider=self.provider, refresh=refresh, capability=GENERATION_CAPABILITY)}
-            if fast_model and generation_ids and fast_model not in generation_ids:
-                warnings.append(f"Saved chat model `{fast_model}` is not currently available for {self.provider_label}; DevAgent will fall back automatically.")
-                fast_model = self._fallback_model_for(self.provider, GENERATION_CAPABILITY, deep=False)
-            if deep_model and generation_ids and deep_model not in generation_ids:
-                warnings.append(f"Saved deep model `{deep_model}` is not currently available for {self.provider_label}; DevAgent will fall back automatically.")
-                deep_model = self._fallback_model_for(self.provider, GENERATION_CAPABILITY, deep=True)
+            generation_listing = self.list_models_safe(
+                provider=self.provider,
+                refresh=refresh,
+                capability=GENERATION_CAPABILITY,
+            )
+            if generation_listing.error:
+                warnings.append(
+                    f"{self.provider_label}: could not verify visible generation models right now. "
+                    f"Keeping the saved/default chat and deep models. {generation_listing.error}"
+                )
+            else:
+                generation_ids = {model.id for model in generation_listing.models}
+                if fast_model and generation_ids and fast_model not in generation_ids:
+                    warnings.append(f"Saved chat model `{fast_model}` is not currently available for {self.provider_label}; DevAgent will fall back automatically.")
+                    fast_model = self._fallback_model_for(self.provider, GENERATION_CAPABILITY, deep=False)
+                if deep_model and generation_ids and deep_model not in generation_ids:
+                    warnings.append(f"Saved deep model `{deep_model}` is not currently available for {self.provider_label}; DevAgent will fall back automatically.")
+                    deep_model = self._fallback_model_for(self.provider, GENERATION_CAPABILITY, deep=True)
 
             if self.supports_embeddings(self.provider):
-                embedding_ids = {model.id for model in self.list_models(provider=self.provider, refresh=refresh, capability=EMBED_CAPABILITY)}
-                if embedding_model and embedding_ids and embedding_model not in embedding_ids:
-                    warnings.append(f"Saved embedding model `{embedding_model}` is not currently available for {self.provider_label}; DevAgent will fall back automatically.")
-                    embedding_model = self._fallback_model_for(self.provider, EMBED_CAPABILITY, deep=False)
+                embedding_listing = self.list_models_safe(
+                    provider=self.provider,
+                    refresh=refresh,
+                    capability=EMBED_CAPABILITY,
+                )
+                if embedding_listing.error:
+                    warnings.append(
+                        f"{self.provider_label}: could not verify visible embedding models right now. "
+                        f"Keeping the saved/default embedding model. {embedding_listing.error}"
+                    )
+                else:
+                    embedding_ids = {model.id for model in embedding_listing.models}
+                    if embedding_model and embedding_ids and embedding_model not in embedding_ids:
+                        warnings.append(f"Saved embedding model `{embedding_model}` is not currently available for {self.provider_label}; DevAgent will fall back automatically.")
+                        embedding_model = self._fallback_model_for(self.provider, EMBED_CAPABILITY, deep=False)
             else:
                 embedding_model = None
 
@@ -233,6 +271,22 @@ class AIClient:
         if capability:
             return [model for model in models if model.supports(capability)]
         return models
+
+    def list_models_safe(
+        self,
+        *,
+        provider: str | None = None,
+        refresh: bool = False,
+        capability: str | None = None,
+    ) -> ProviderModelListing:
+        target = provider or self.provider
+        if not target:
+            return ProviderModelListing(provider=provider or "unknown", models=(), error="No AI provider is selected.")
+        try:
+            models = self.list_models(provider=target, refresh=refresh, capability=capability)
+            return ProviderModelListing(provider=target, models=tuple(models))
+        except Exception as exc:
+            return ProviderModelListing(provider=target, models=(), error=humanize_provider_error(target, exc))
 
     def _resolved_generation_model(self, *, deep: bool) -> str | None:
         if not self.provider:
@@ -666,8 +720,14 @@ def extract_model_items(payload) -> list[object]:
 
 def fetch_json(url: str, *, headers: dict[str, str]) -> object:
     req = request.Request(url, headers={**headers, "Accept": "application/json"})
-    with request.urlopen(req, timeout=20) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with request.urlopen(req, timeout=20) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        raise RuntimeError(extract_http_error_message(exc)) from exc
+    except error.URLError as exc:
+        reason = clean_error_text(str(getattr(exc, "reason", exc))) or "Network request failed."
+        raise RuntimeError(f"Network error: {reason}") from exc
 
 
 def extract_chat_completion_text(response) -> str | None:
@@ -726,3 +786,69 @@ def unique_preserving_order(values: Iterable[str]) -> list[str]:
             continue
         seen.append(value)
     return seen
+
+
+def humanize_provider_error(provider: str, exc: Exception) -> str:
+    label = PROVIDER_LABELS.get(provider, provider)
+    message = clean_error_text(str(exc)) or "Provider request failed."
+    if message.lower().startswith(label.lower()):
+        return message
+    return message
+
+
+def extract_http_error_message(exc: error.HTTPError) -> str:
+    status = getattr(exc, "code", None)
+    reason = clean_error_text(str(getattr(exc, "reason", "") or "")) or "HTTP error"
+    body_text = ""
+    try:
+        body_text = exc.read().decode("utf-8", errors="replace")
+    except Exception:
+        body_text = ""
+    detail = extract_error_detail_from_body(body_text)
+    if detail:
+        if reason and reason.casefold() not in detail.casefold():
+            return f"HTTP {status} {reason}: {detail}"
+        return f"HTTP {status}: {detail}"
+    return f"HTTP {status} {reason}"
+
+
+def extract_error_detail_from_body(body_text: str) -> str | None:
+    compact_body = clean_error_text(body_text)
+    if not compact_body:
+        return None
+    try:
+        payload = json.loads(body_text)
+    except Exception:
+        return compact_body
+
+    if isinstance(payload, dict):
+        error_value = payload.get("error")
+        top_message = clean_error_text(str(payload.get("message", ""))) if payload.get("message") else ""
+        code_value = payload.get("code")
+        code_message = ""
+        if isinstance(code_value, str) and not code_value.isdigit():
+            code_message = clean_error_text(code_value)
+
+        if isinstance(error_value, dict):
+            nested_message = clean_error_text(str(error_value.get("message", ""))) if error_value.get("message") else ""
+            nested_error = clean_error_text(str(error_value.get("error", ""))) if error_value.get("error") else ""
+            nested_code = error_value.get("code")
+            nested_code_text = ""
+            if isinstance(nested_code, str) and not nested_code.isdigit():
+                nested_code_text = clean_error_text(nested_code)
+            parts = [part for part in (nested_message, nested_error, nested_code_text, top_message, code_message) if part]
+            return " ".join(unique_preserving_order(parts)) or compact_body
+
+        if isinstance(error_value, str):
+            error_message = clean_error_text(error_value)
+            parts = [part for part in (code_message, error_message, top_message) if part]
+            return " ".join(unique_preserving_order(parts)) or compact_body
+
+        if top_message or code_message:
+            return " ".join(unique_preserving_order([part for part in (top_message, code_message) if part]))
+
+    return compact_body
+
+
+def clean_error_text(value: str) -> str:
+    return " ".join(value.split()).strip()

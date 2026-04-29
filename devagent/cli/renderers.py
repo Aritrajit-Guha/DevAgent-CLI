@@ -16,7 +16,7 @@ from devagent.core.actions import (
     RunLaunchResult,
     WorkspaceSnapshot,
 )
-from devagent.tools.ai import AIStatusSnapshot, DiscoveredModel
+from devagent.tools.ai import AIStatusSnapshot, ProviderModelListing
 from devagent.tools.git_tool import CommitSuggestion, GitRemote
 from devagent.tools.insights import Finding
 from devagent.tools.node_tool import NodePackage
@@ -205,9 +205,12 @@ def ai_status_renderable(status: AIStatusSnapshot) -> RenderableType:
             details = [provider.label]
             if provider.api_source:
                 details.append(provider.api_source)
-            details.append(f"{provider.generation_models} chat")
-            if provider.embedding_models:
-                details.append(f"{provider.embedding_models} embed")
+            if provider.error:
+                details.append(f"unavailable: {provider.error}")
+            else:
+                details.append(f"{provider.generation_models} chat")
+                if provider.embedding_models:
+                    details.append(f"{provider.embedding_models} embed")
             if provider.selected:
                 details.append("selected")
             provider_lines.append(" | ".join(details))
@@ -219,16 +222,19 @@ def ai_status_renderable(status: AIStatusSnapshot) -> RenderableType:
     return table
 
 
-def ai_models_renderable(provider: str, models: list[DiscoveredModel]) -> RenderableType:
-    table = app_table(f"{provider} Models")
+def ai_models_renderable(listing: ProviderModelListing) -> RenderableType:
+    table = app_table(f"{listing.provider} Models")
     table.add_column("Model")
     table.add_column("Label")
     table.add_column("Capabilities")
     table.add_column("Aliases")
-    if not models:
+    if listing.error:
+        table.add_row("unavailable", listing.error, "-", "-")
+        return table
+    if not listing.models:
         table.add_row("none", "No visible models for this provider.", "-", "-")
         return table
-    for model in models:
+    for model in listing.models:
         table.add_row(
             model.id,
             model.label,
@@ -246,4 +252,6 @@ def ai_selection_renderable(selection: AISelectionResult) -> RenderableType:
     table.add_row("Chat model", selection.fast_model or "none")
     table.add_row("Deep model", selection.deep_model or "none")
     table.add_row("Embedding model", selection.embedding_model or "none")
+    if selection.warnings:
+        table.add_row("Warnings", "\n".join(f"- {warning}" for warning in selection.warnings))
     return table

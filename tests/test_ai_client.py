@@ -387,6 +387,55 @@ def test_ai_client_status_warns_and_falls_back_when_saved_model_is_missing(tmp_p
     assert any("ghost-embed" in warning for warning in status.warnings)
 
 
+def test_ai_client_provider_status_warns_and_continues_when_one_provider_fails(tmp_path: Path, monkeypatch) -> None:
+    _clear_ai_caches()
+    monkeypatch.setenv("DEVAGENT_CONFIG_DIR", str(tmp_path / "config-home"))
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
+    monkeypatch.setenv("XAI_API_KEY", "xai-key")
+
+    class FakeModels:
+        def list(self):
+            return [
+                types.SimpleNamespace(
+                    name="models/gemini-2.5-flash",
+                    display_name="Gemini 2.5 Flash",
+                    supported_generation_methods=["generateContent"],
+                ),
+                types.SimpleNamespace(
+                    name="models/gemini-embedding-001",
+                    display_name="Gemini Embedding",
+                    supported_generation_methods=["embedContent"],
+                ),
+            ]
+
+    class FakeClient:
+        def __init__(self, api_key=None):
+            self.models = FakeModels()
+
+    fake_google = types.ModuleType("google")
+    fake_google.genai = types.SimpleNamespace(Client=FakeClient)
+    monkeypatch.setitem(sys.modules, "google", fake_google)
+    monkeypatch.setattr(
+        ai_module,
+        "fetch_json",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("HTTP 403 Forbidden: The caller does not have permission to execute the specified operation. Your newly created team doesn't have any credits or licenses yet.")
+        ),
+    )
+
+    status = AIClient.from_env().provider_status(refresh=True)
+
+    assert status.selected_provider == "gemini"
+    gemini = next(item for item in status.providers if item.provider == "gemini")
+    xai = next(item for item in status.providers if item.provider == "xai")
+    assert gemini.error is None
+    assert gemini.generation_models == 1
+    assert gemini.embedding_models == 1
+    assert xai.error is not None
+    assert "403" in xai.error
+    assert any("xAI" in warning for warning in status.warnings)
+
+
 def test_xai_embed_returns_none_without_embedding_support() -> None:
     client = AIClient(provider="xai", api_key="xai-key", api_source="XAI_API_KEY", embedding_model=None, available_providers=("xai",))
 
