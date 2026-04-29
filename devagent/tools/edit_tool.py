@@ -74,8 +74,8 @@ class EditAgent:
                 instruction=instruction,
                 diff=None,
                 message=(
-                    "Gemini is not configured, so I will not invent a patch. "
-                    "Set GEMINI_API_KEY and rerun this command.\n\nRelevant files:\n"
+                    f"{self.ai.provider_label} is not configured, so I will not invent a patch. "
+                    "Configure an AI provider key and rerun this command.\n\nRelevant files:\n"
                     f"{files or 'No relevant files found.'}"
                 ),
             )

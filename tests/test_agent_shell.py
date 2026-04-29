@@ -3,10 +3,11 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from devagent.cli.main import app
-from devagent.core.actions import PullOutcome, PullRequestPreview, PushOutcome, WorkspaceSnapshot
+from devagent.core.actions import AISelectionResult, PullOutcome, PullRequestPreview, PushOutcome, WorkspaceSnapshot
 from devagent.core.agent import RepoAgent
 from devagent.core.project import ProjectInfo
 from devagent.core.shell import AgentShell, GitIntent, home_menu_choices, interactive_terminal
+from devagent.tools.ai import AIProviderStatus, AIStatusSnapshot
 from devagent.tools.git_tool import GitRemote
 from devagent.tools.runtime_tool import LaunchSpec
 from devagent.tools.setup_tool import SetupResult
@@ -218,6 +219,7 @@ def test_home_menu_choices_cover_all_modes() -> None:
     labels = [choice.label for choice in home_menu_choices()]
 
     assert labels == [
+        "AI",
         "Chat",
         "Git",
         "Run",
@@ -249,8 +251,20 @@ def test_devagent_help_catalogs_command_families(monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert "Command families:" in result.stdout
+    assert "`ai`" in result.stdout
     assert "Tip: running `devagent` with no subcommand opens the interactive shell." in result.stdout
     assert "devagent run start --open-browser" in result.stdout
+
+
+def test_ai_help_catalog_is_richer(monkeypatch) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr("devagent.cli.main.interactive_terminal", lambda: False)
+
+    result = runner.invoke(app, ["ai", "--help"])
+
+    assert result.exit_code == 0
+    assert "Discover configured AI providers" in result.stdout
+    assert "save defaults" in result.stdout
 
 
 def test_git_help_catalog_is_richer(monkeypatch) -> None:
@@ -274,6 +288,31 @@ def test_chat_help_mentions_deep_and_session_flags(monkeypatch) -> None:
     assert "--deep" in result.stdout
     assert "--new-session" in result.stdout
     assert "Ask a repo-aware question" in result.stdout
+
+
+def test_ai_status_command_renders_without_a_bound_workspace(monkeypatch) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr("devagent.cli.main.interactive_terminal", lambda: False)
+
+    class FakeActions:
+        def ai_status(self, refresh=False):
+            return AIStatusSnapshot(
+                selected_provider="xai",
+                fast_model="grok-3-mini",
+                deep_model="grok-3-mini",
+                embedding_model=None,
+                providers=(
+                    AIProviderStatus("xai", "XAI_API_KEY", True, generation_models=2, embedding_models=0),
+                ),
+            )
+
+    monkeypatch.setattr("devagent.cli.main._ai_actions", lambda: FakeActions())
+
+    result = runner.invoke(app, ["ai", "status"])
+
+    assert result.exit_code == 0
+    assert "xai" in result.stdout
+    assert "grok-3-mini" in result.stdout
 
 
 def test_git_pull_help_shows_explicit_remote_and_branch_flags(monkeypatch) -> None:
@@ -336,6 +375,37 @@ def test_shell_pull_wizard_uses_tracking_branch_without_extra_prompts(tmp_path: 
     assert result.remote == "upstream"
     assert result.remote_branch == "main"
     assert result.rebase is False
+
+
+def test_shell_can_save_ai_provider_selection(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    shell = AgentShell(workspace)
+
+    shell.actions.ai_status = lambda refresh=False: AIStatusSnapshot(
+        selected_provider="gemini",
+        fast_model="gemini-2.5-flash",
+        deep_model="gemini-2.5-pro",
+        embedding_model="gemini-embedding-001",
+        providers=(
+            AIProviderStatus("gemini", "GEMINI_API_KEY", True, generation_models=2, embedding_models=1),
+            AIProviderStatus("xai", "XAI_API_KEY", False, generation_models=2, embedding_models=0),
+        ),
+    )
+    calls: list[str] = []
+    shell.actions.save_ai_selection = lambda **kwargs: calls.append(kwargs["provider"]) or AISelectionResult(
+        provider=kwargs["provider"],
+        fast_model="grok-3-mini",
+        deep_model="grok-3-mini",
+        embedding_model=None,
+    )
+    shell.choose_named_value = lambda *args, **kwargs: "xai"
+
+    result = shell.set_default_provider_action()
+
+    assert result.title == "AI Selection Saved"
+    assert result.use_panel is False
+    assert calls == ["xai"]
 
 
 def test_shell_pull_wizard_asks_only_for_remote_and_branch_when_untracked(tmp_path: Path, monkeypatch) -> None:

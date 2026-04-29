@@ -3,22 +3,77 @@ from __future__ import annotations
 import json
 import os
 from hashlib import sha256
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 
 @dataclass(frozen=True)
+class ProviderModelConfig:
+    model: str | None = None
+    deep_model: str | None = None
+    embedding_model: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "ProviderModelConfig":
+        payload = data or {}
+        return cls(
+            model=payload.get("model"),
+            deep_model=payload.get("deep_model"),
+            embedding_model=payload.get("embedding_model"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "deep_model": self.deep_model,
+            "embedding_model": self.embedding_model,
+        }
+
+
+@dataclass(frozen=True)
+class AISettings:
+    selected_provider: str | None = None
+    providers: dict[str, ProviderModelConfig] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "AISettings":
+        payload = data or {}
+        provider_payload = payload.get("providers") or {}
+        return cls(
+            selected_provider=payload.get("selected_provider"),
+            providers={
+                name: ProviderModelConfig.from_dict(config)
+                for name, config in provider_payload.items()
+                if isinstance(config, dict)
+            },
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "selected_provider": self.selected_provider,
+            "providers": {name: config.to_dict() for name, config in self.providers.items()},
+        }
+
+
+@dataclass(frozen=True)
 class DevAgentConfig:
     workspace_path: Path | None = None
+    ai_settings: AISettings = field(default_factory=AISettings)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "DevAgentConfig":
         raw_path = data.get("workspace_path")
-        return cls(workspace_path=Path(raw_path).expanduser().resolve() if raw_path else None)
+        return cls(
+            workspace_path=Path(raw_path).expanduser().resolve() if raw_path else None,
+            ai_settings=AISettings.from_dict(data.get("ai_settings")),
+        )
 
     def to_dict(self) -> dict[str, Any]:
-        return {"workspace_path": str(self.workspace_path) if self.workspace_path else None}
+        return {
+            "workspace_path": str(self.workspace_path) if self.workspace_path else None,
+            "ai_settings": self.ai_settings.to_dict(),
+        }
 
 
 class ConfigManager:
@@ -55,6 +110,17 @@ class ConfigManager:
 
     @classmethod
     def bind_workspace(cls, path: Path) -> DevAgentConfig:
-        config = DevAgentConfig(workspace_path=path.expanduser().resolve())
+        current = cls.load()
+        config = DevAgentConfig(
+            workspace_path=path.expanduser().resolve(),
+            ai_settings=current.ai_settings,
+        )
         cls.save(config)
         return config
+
+    @classmethod
+    def save_ai_settings(cls, ai_settings: AISettings) -> DevAgentConfig:
+        current = cls.load()
+        updated = DevAgentConfig(workspace_path=current.workspace_path, ai_settings=ai_settings)
+        cls.save(updated)
+        return updated

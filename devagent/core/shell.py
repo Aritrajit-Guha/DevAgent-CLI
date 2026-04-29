@@ -11,6 +11,9 @@ from rich.prompt import Confirm, Prompt
 
 from devagent.cli.prompts import MenuChoice, choose_directory, choose_menu_action
 from devagent.cli.renderers import (
+    ai_models_renderable,
+    ai_selection_renderable,
+    ai_status_renderable,
     commit_suggestion_renderable,
     git_pull_summary_renderable,
     git_push_summary_renderable,
@@ -54,6 +57,7 @@ def interactive_terminal() -> bool:
 
 def home_menu_choices() -> list[MenuChoice]:
     return [
+        MenuChoice("AI", "ai"),
         MenuChoice("Chat", "chat"),
         MenuChoice("Git", "git"),
         MenuChoice("Run", "run"),
@@ -64,6 +68,19 @@ def home_menu_choices() -> list[MenuChoice]:
         MenuChoice("Quick command / phrase", "quick"),
         MenuChoice("Help", "help"),
         MenuChoice("Exit", "exit"),
+    ]
+
+
+def ai_menu_choices() -> list[MenuChoice]:
+    return [
+        MenuChoice("Show current AI status", "status"),
+        MenuChoice("Show available models", "models"),
+        MenuChoice("Choose the default provider", "provider"),
+        MenuChoice("Choose the default chat model", "chat_model"),
+        MenuChoice("Choose the default deep model", "deep_model"),
+        MenuChoice("Choose the embedding model", "embedding_model"),
+        MenuChoice("Reset saved AI settings", "reset"),
+        MenuChoice("Back to home", "back"),
     ]
 
 
@@ -156,6 +173,7 @@ class AgentShell:
             f"Saved run phrases: {len(inventory.profiles)}",
             "",
             "Modes:",
+            "- AI for provider selection and model discovery",
             "- Chat for repo-aware Q&A",
             "- Git for version-control workflows",
             "- Run for launching services and saved phrases",
@@ -175,7 +193,9 @@ class AgentShell:
             choice = choose_menu_action(console, "DevAgent Home", home_menu_choices())
             if not choice or choice == "exit":
                 return
-            if choice == "chat":
+            if choice == "ai":
+                self.ai_mode()
+            elif choice == "chat":
                 self.chat_mode()
             elif choice == "git":
                 self.git_mode()
@@ -193,6 +213,32 @@ class AgentShell:
                 self.quick_command_mode()
             elif choice == "help":
                 self.display_result(self.help_result())
+
+    def ai_mode(self) -> None:
+        while True:
+            action = choose_menu_action(console, "AI Mode", ai_menu_choices())
+            if not action or action == "back":
+                return
+            try:
+                if action == "status":
+                    result = self.ai_status_result()
+                elif action == "models":
+                    result = self.ai_models_result()
+                elif action == "provider":
+                    result = self.set_default_provider_action()
+                elif action == "chat_model":
+                    result = self.set_default_model_action(kind="chat")
+                elif action == "deep_model":
+                    result = self.set_default_model_action(kind="deep")
+                elif action == "embedding_model":
+                    result = self.set_default_model_action(kind="embed")
+                elif action == "reset":
+                    result = self.reset_ai_settings_action()
+                else:
+                    result = None
+            except (RuntimeError, ValueError) as exc:
+                result = ShellResult("AI Mode Failed", str(exc), "error")
+            self.display_result(result)
 
     def display_result(self, result: ShellResult | None) -> None:
         if not result:
@@ -416,6 +462,7 @@ class AgentShell:
                     "Use the Home menu to move between modes.",
                     "",
                     "Modes:",
+                    "AI     -> provider selection, model discovery, and saved defaults",
                     "Chat   -> repo-aware conversation with session memory",
                     "Git    -> branch, commit, push, PR, and merge helpers",
                     "Run    -> start services and manage saved phrases",
@@ -430,6 +477,16 @@ class AgentShell:
             ),
             "info",
         )
+
+    def ai_status_result(self) -> ShellResult:
+        return ShellResult("AI Status", ai_status_renderable(self.actions.ai_status()), "info", use_panel=False)
+
+    def ai_models_result(self, provider: str | None = None) -> ShellResult:
+        models_by_provider = self.actions.ai_models(provider=provider, refresh=True)
+        if not models_by_provider:
+            return ShellResult("AI Models", "No AI providers are configured yet. Add a supported API key first.", "warning")
+        renderables = [ai_models_renderable(name, models) for name, models in models_by_provider.items()]
+        return ShellResult("AI Models", Group(*renderables), "info", use_panel=False)
 
     def workspace_status_result(self) -> ShellResult:
         snapshot = self.actions.workspace_status()
@@ -449,6 +506,52 @@ class AgentShell:
         selected = choose_directory(console, self.workspace, "Choose a workspace to bind")
         snapshot = self.actions.bind_workspace(selected)
         return ShellResult("Workspace Linked", workspace_status_table(snapshot), "success", use_panel=False)
+
+    def set_default_provider_action(self) -> ShellResult:
+        status = self.actions.ai_status(refresh=True)
+        provider_names = [item.provider for item in status.providers]
+        if not provider_names:
+            return ShellResult("AI Provider", "No AI providers are configured yet. Add a supported API key first.", "warning")
+        current = status.selected_provider or provider_names[0]
+        provider = self.choose_named_value("Choose the default provider", provider_names, default=current)
+        selection = self.actions.save_ai_selection(provider=provider)
+        return ShellResult("AI Selection Saved", ai_selection_renderable(selection), "success", use_panel=False)
+
+    def set_default_model_action(self, *, kind: str) -> ShellResult:
+        status = self.actions.ai_status(refresh=True)
+        provider_names = [item.provider for item in status.providers]
+        if not provider_names:
+            return ShellResult("AI Models", "No AI providers are configured yet. Add a supported API key first.", "warning")
+        default_provider = status.selected_provider or provider_names[0]
+        provider = self.choose_named_value("Choose the provider to configure", provider_names, default=default_provider)
+        models = self.actions.ai_models(provider=provider, refresh=True).get(provider, [])
+        if kind == "embed":
+            models = [model for model in models if "embed" in model.capabilities]
+            if not models:
+                return ShellResult("Embedding Models", f"{provider} does not currently expose embedding models in DevAgent.", "warning")
+            default_model = status.embedding_model or models[0].id
+            chosen = self.choose_named_value("Choose the embedding model", [model.id for model in models], default=default_model)
+            selection = self.actions.save_ai_selection(provider=provider, embedding_model=chosen)
+            return ShellResult("AI Selection Saved", ai_selection_renderable(selection), "success", use_panel=False)
+
+        generation_models = [model for model in models if "generate" in model.capabilities]
+        if not generation_models:
+            return ShellResult("AI Models", f"No generation models are currently visible for {provider}.", "warning")
+        if kind == "deep":
+            default_model = status.deep_model or generation_models[0].id
+            chosen = self.choose_named_value("Choose the default deep model", [model.id for model in generation_models], default=default_model)
+            selection = self.actions.save_ai_selection(provider=provider, deep_model=chosen)
+        else:
+            default_model = status.fast_model or generation_models[0].id
+            chosen = self.choose_named_value("Choose the default chat model", [model.id for model in generation_models], default=default_model)
+            selection = self.actions.save_ai_selection(provider=provider, fast_model=chosen)
+        return ShellResult("AI Selection Saved", ai_selection_renderable(selection), "success", use_panel=False)
+
+    def reset_ai_settings_action(self) -> ShellResult:
+        if not Confirm.ask("Reset saved AI provider and model selections?", default=False):
+            return ShellResult("AI Settings", "Kept the current AI settings.", "warning")
+        self.actions.reset_ai_settings()
+        return ShellResult("AI Settings Reset", ai_status_renderable(self.actions.ai_status(refresh=False)), "success", use_panel=False)
 
     def clone_setup_action(self) -> ShellResult:
         repo_url = Prompt.ask("Paste the GitHub repository page URL")

@@ -9,6 +9,9 @@ from rich.prompt import Confirm, Prompt
 
 from devagent.cli.prompts import MenuChoice, can_use_arrow_menu, choose_directory, choose_menu_action
 from devagent.cli.renderers import (
+    ai_models_renderable,
+    ai_selection_renderable,
+    ai_status_renderable,
     commit_suggestion_renderable,
     git_pull_summary_renderable,
     git_push_summary_renderable,
@@ -31,6 +34,7 @@ APP_HELP = dedent(
     Local-first agentic AI developer assistant.
 
     Command families:
+    - `ai`: discover configured providers, browse visible models, and save defaults
     - `chat`: ask grounded repo questions with session memory and deep mode
     - `git`: run guided Git, push, PR, and merge workflows
     - `run`: launch local services and saved startup phrases
@@ -39,6 +43,7 @@ APP_HELP = dedent(
 
     Typical flows:
     - `devagent workspace bind D:\\MyProject`
+    - `devagent ai status`
     - `devagent chat "Explain the auth flow"`
     - `devagent git --help`
     - `devagent run start --open-browser`
@@ -97,6 +102,16 @@ RUN_HELP = dedent(
     """
 ).strip()
 
+AI_HELP = dedent(
+    """
+    Discover configured AI providers, browse visible models, and save defaults.
+
+    Use this family when you want to see which providers DevAgent can use from
+    your current API keys, compare visible models, or switch the default
+    provider and model without editing environment variables by hand.
+    """
+).strip()
+
 COMMIT_HELP = dedent(
     """
     Commit message helpers.
@@ -107,6 +122,7 @@ COMMIT_HELP = dedent(
 ).strip()
 
 app = typer.Typer(help=APP_HELP, invoke_without_command=True, no_args_is_help=False)
+ai_app = typer.Typer(help=AI_HELP, invoke_without_command=True)
 workspace_app = typer.Typer(help=WORKSPACE_HELP)
 setup_app = typer.Typer(help=SETUP_HELP)
 new_app = typer.Typer(help=NEW_HELP)
@@ -118,6 +134,7 @@ merge_app = typer.Typer(help="Inspect, abort, and continue merges with clearer c
 commit_app = typer.Typer(help=COMMIT_HELP)
 
 app.add_typer(workspace_app, name="workspace")
+app.add_typer(ai_app, name="ai")
 app.add_typer(setup_app, name="setup")
 app.add_typer(new_app, name="new")
 app.add_typer(git_app, name="git")
@@ -160,6 +177,11 @@ def _print_project_status(path: Path) -> None:
 
 def _actions(explicit: Optional[Path] = None) -> DevAgentActions:
     return DevAgentActions(_workspace_path(explicit))
+
+
+def _ai_actions() -> DevAgentActions:
+    config = ConfigManager.load()
+    return DevAgentActions(config.workspace_path or Path.cwd())
 
 
 def _print_run_menu() -> None:
@@ -214,6 +236,79 @@ def git_callback(ctx: typer.Context) -> None:
 def run_callback(ctx: typer.Context) -> None:
     if ctx.invoked_subcommand is None:
         _print_run_menu()
+
+
+@ai_app.callback()
+def ai_callback(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        console.print(ai_status_renderable(_ai_actions().ai_status(refresh=True)))
+
+
+@ai_app.command("status", help="Show which providers are configured, which one is selected, and which models DevAgent will use right now.")
+def ai_status(refresh: bool = typer.Option(False, "--refresh", help="Refresh visible model data before rendering status.")) -> None:
+    console.print(ai_status_renderable(_ai_actions().ai_status(refresh=refresh)))
+
+
+@ai_app.command("models", help="List the models DevAgent can currently see for the configured providers.")
+def ai_models(
+    provider: Optional[str] = typer.Option(None, "--provider", help="Limit the model list to one provider, such as `gemini` or `xai`."),
+    refresh: bool = typer.Option(False, "--refresh", help="Refresh visible model data before listing models."),
+) -> None:
+    models_by_provider = _ai_actions().ai_models(provider=provider, refresh=refresh)
+    if not models_by_provider:
+        console.print(app_panel("No AI providers are configured yet. Add a supported API key first.", "AI Models", tone="warning", expand=False))
+        raise typer.Exit(code=1)
+    for index, (name, models) in enumerate(models_by_provider.items()):
+        if index:
+            console.print()
+        console.print(ai_models_renderable(name, models))
+
+
+@ai_app.command("use", help="Save the default provider and model selection DevAgent should use for chat, edit, and other AI-powered flows.")
+def ai_use(
+    provider: Optional[str] = typer.Option(None, "--provider", help="Provider to save as the default, such as `gemini` or `xai`."),
+    model: Optional[str] = typer.Option(None, "--model", help="Default chat model for the chosen provider."),
+    deep_model: Optional[str] = typer.Option(None, "--deep-model", help="Default deep-synthesis model for the chosen provider."),
+    embedding_model: Optional[str] = typer.Option(None, "--embedding-model", help="Default embedding model for the chosen provider when supported."),
+) -> None:
+    actions = _ai_actions()
+    status = actions.ai_status(refresh=True)
+    configured = [item.provider for item in status.providers]
+    if not configured:
+        console.print(app_panel("No AI providers are configured yet. Add a supported API key first.", "AI Selection", tone="warning", expand=False))
+        raise typer.Exit(code=1)
+
+    chosen_provider = provider or status.selected_provider or configured[0]
+    if chosen_provider not in configured:
+        raise typer.BadParameter(f"Provider `{chosen_provider}` is not currently configured.")
+
+    visible_models = actions.ai_models(provider=chosen_provider, refresh=True).get(chosen_provider, [])
+    generation_ids = {item.id for item in visible_models if "generate" in item.capabilities}
+    embedding_ids = {item.id for item in visible_models if "embed" in item.capabilities}
+
+    if model and generation_ids and model not in generation_ids:
+        raise typer.BadParameter(f"Model `{model}` is not visible for provider `{chosen_provider}`.")
+    if deep_model and generation_ids and deep_model not in generation_ids:
+        raise typer.BadParameter(f"Deep model `{deep_model}` is not visible for provider `{chosen_provider}`.")
+    if embedding_model and embedding_ids and embedding_model not in embedding_ids:
+        raise typer.BadParameter(f"Embedding model `{embedding_model}` is not visible for provider `{chosen_provider}`.")
+    if embedding_model and not embedding_ids:
+        raise typer.BadParameter(f"Provider `{chosen_provider}` does not currently expose embedding models in DevAgent.")
+
+    selection = actions.save_ai_selection(
+        provider=chosen_provider,
+        fast_model=model,
+        deep_model=deep_model,
+        embedding_model=embedding_model,
+    )
+    console.print(ai_selection_renderable(selection))
+
+
+@ai_app.command("reset", help="Clear the saved default provider and model selections so DevAgent falls back to environment-driven defaults again.")
+def ai_reset() -> None:
+    actions = _ai_actions()
+    actions.reset_ai_settings()
+    console.print(ai_status_renderable(actions.ai_status(refresh=False)))
 
 
 @workspace_app.command("bind")
@@ -329,7 +424,7 @@ def index_workspace(path: Optional[Path] = typer.Option(None, "--path", "-p", he
 )
 def chat(
     question: str = typer.Argument(..., help="Question about the active workspace."),
-    deep: bool = typer.Option(False, "--deep", help="Use broader retrieval and the deep Gemini model when configured."),
+    deep: bool = typer.Option(False, "--deep", help="Use broader retrieval and the saved deep model for the active provider when configured."),
     new_session: bool = typer.Option(False, "--new-session", help="Clear saved workspace chat context before answering."),
 ) -> None:
     answer = _actions().chat(question, deep=deep, new_session=new_session)

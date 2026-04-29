@@ -209,8 +209,9 @@ def build_prompt(*, question: str, intent: str, queries: list[str], project, ses
 
 
 def build_grounded_fallback(*, question: str, intent: str, project, session, chunks, relevant_files: list[str]) -> str:
+    provider_label = AIClient.from_env().provider_label
     lines = [
-        f"I found grounded repo context for your {intent} question, but Gemini is not available right now.",
+        f"I found grounded repo context for your {intent} question, but {provider_label} is not available right now.",
         "",
         "What I found:",
         *(relevant_files or ["- No indexed chunks matched directly."]),
@@ -221,7 +222,7 @@ def build_grounded_fallback(*, question: str, intent: str, project, session, chu
     if session.summary:
         lines.extend(["", f"Conversation memory: {session.summary}"])
     if chunks:
-        lines.extend(["", "Best next step:", "Set GEMINI_API_KEY to get a synthesized answer over these exact files."])
+        lines.extend(["", "Best next step:", "Configure an AI provider key and rerun the question to get a synthesized answer over these exact files."])
     else:
         lines.extend(["", "Best next step:", "Run `devagent index` and ask a more specific question about a file, route, module, or feature."])
     return "\n".join(lines)

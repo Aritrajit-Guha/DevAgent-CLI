@@ -4,10 +4,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from devagent.config.settings import ConfigManager
+from devagent.config.settings import AISettings, ConfigManager, ProviderModelConfig
 from devagent.context.indexer import CodeIndexer
 from devagent.core.agent import RepoAgent
 from devagent.core.project import ProjectInfo, detect_project
+from devagent.tools.ai import AIClient, AIStatusSnapshot, DiscoveredModel
 from devagent.tools.edit_tool import EditAgent, EditProposal
 from devagent.tools.git_tool import (
     CommitSuggestion,
@@ -86,6 +87,14 @@ class MergeConflictDetail:
     markers: int
 
 
+@dataclass(frozen=True)
+class AISelectionResult:
+    provider: str
+    fast_model: str | None
+    deep_model: str | None
+    embedding_model: str | None
+
+
 def validate_workspace_path(path: Path) -> Path:
     resolved = path.expanduser().resolve()
     if not resolved.exists() or not resolved.is_dir():
@@ -143,6 +152,51 @@ class DevAgentActions:
 
     def clear_chat_session(self) -> None:
         self.repo_agent.clear_session()
+
+    def ai_status(self, *, refresh: bool = False) -> AIStatusSnapshot:
+        return AIClient.from_env().provider_status(refresh=refresh)
+
+    def ai_models(self, *, provider: str | None = None, refresh: bool = False) -> dict[str, list[DiscoveredModel]]:
+        client = AIClient.from_env()
+        if provider:
+            return {provider: client.list_models(provider=provider, refresh=refresh)}
+        return {
+            name: client.list_models(provider=name, refresh=refresh)
+            for name in client.available_providers
+        }
+
+    def save_ai_selection(
+        self,
+        *,
+        provider: str,
+        fast_model: str | None = None,
+        deep_model: str | None = None,
+        embedding_model: str | None = None,
+    ) -> AISelectionResult:
+        config = ConfigManager.load()
+        ai_settings = config.ai_settings
+        provider_config = ai_settings.providers.get(provider, ProviderModelConfig())
+        updated_provider = ProviderModelConfig(
+            model=fast_model if fast_model is not None else provider_config.model,
+            deep_model=deep_model if deep_model is not None else provider_config.deep_model,
+            embedding_model=embedding_model if embedding_model is not None else provider_config.embedding_model,
+        )
+        providers = dict(ai_settings.providers)
+        providers[provider] = updated_provider
+        updated_settings = AISettings(selected_provider=provider, providers=providers)
+        ConfigManager.save_ai_settings(updated_settings)
+        self.refresh_workspace(self.workspace)
+        client = AIClient.from_env()
+        return AISelectionResult(
+            provider=provider,
+            fast_model=client.fast_model,
+            deep_model=client.deep_model,
+            embedding_model=client.embedding_model,
+        )
+
+    def reset_ai_settings(self) -> None:
+        ConfigManager.save_ai_settings(AISettings())
+        self.refresh_workspace(self.workspace)
 
     def packages(self) -> list[NodePackage]:
         return find_node_packages(self.workspace)
