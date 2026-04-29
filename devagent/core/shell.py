@@ -123,9 +123,17 @@ def setup_menu_choices() -> list[MenuChoice]:
 
 class AgentShell:
     def __init__(self, workspace: Path):
-        self.workspace = workspace.expanduser().resolve()
-        self.actions = DevAgentActions(self.workspace)
+        resolved = workspace.expanduser().resolve()
+        self.actions = DevAgentActions(resolved)
         self.deep_mode = False
+
+    @property
+    def workspace(self) -> Path:
+        return self.actions.workspace
+
+    @workspace.setter
+    def workspace(self, value: Path) -> None:
+        self.actions.refresh_workspace(value)
 
     @property
     def repo_agent(self):
@@ -440,7 +448,6 @@ class AgentShell:
     def rebind_workspace_action(self) -> ShellResult:
         selected = choose_directory(console, self.workspace, "Choose a workspace to bind")
         snapshot = self.actions.bind_workspace(selected)
-        self.workspace = snapshot.project.path
         return ShellResult("Workspace Linked", workspace_status_table(snapshot), "success", use_panel=False)
 
     def clone_setup_action(self) -> ShellResult:
@@ -449,8 +456,7 @@ class AgentShell:
         install_deps = Confirm.ask("Install dependencies if DevAgent detects them?", default=False)
         open_code = Confirm.ask("Open the project in VS Code after setup?", default=False)
         result = self.actions.clone_repo(repo_url, target=target, install_deps=install_deps, open_code=open_code)
-        self.workspace = result.path
-        return ShellResult("Clone Complete", result.message, "success")
+        return self.setup_result_with_workspace("Clone Complete", result.message)
 
     def publish_setup_action(self) -> ShellResult:
         local_path = choose_directory(console, self.workspace, "Choose your local project folder")
@@ -458,8 +464,7 @@ class AgentShell:
         private = Confirm.ask("Create the GitHub repo as private?", default=False)
         push = Confirm.ask("Push the local project after creating the remote?", default=True)
         result = self.actions.publish_repo(local_path, repo_name=repo_name, private=private, push=push)
-        self.workspace = result.path
-        return ShellResult("Publish Complete", result.message, "success")
+        return self.setup_result_with_workspace("Publish Complete", result.message)
 
     def guided_project_action(self) -> ShellResult:
         mode = Prompt.ask(
@@ -474,16 +479,14 @@ class AgentShell:
             install_deps = Confirm.ask("Install dependencies if DevAgent detects them?", default=False)
             open_code = Confirm.ask("Open the project in VS Code after setup?", default=False)
             result = self.actions.clone_repo(repo_url, target=target, install_deps=install_deps, open_code=open_code)
-            self.workspace = result.path
-            return ShellResult("Clone Complete", result.message, "success")
+            return self.setup_result_with_workspace("Clone Complete", result.message)
 
         local_path = choose_directory(console, start, "Choose your local project folder")
         repo_name = Prompt.ask("GitHub repository name", default=local_path.name)
         private = Confirm.ask("Create the GitHub repo as private?", default=False)
         push = Confirm.ask("Push the local project after creating the remote?", default=True)
         result = self.actions.publish_repo(local_path, repo_name=repo_name, private=private, push=push)
-        self.workspace = result.path
-        return ShellResult("Publish Complete", result.message, "success")
+        return self.setup_result_with_workspace("Publish Complete", result.message)
 
     def run_detected_action(self) -> ShellResult:
         open_browser = Confirm.ask("Open the app in the browser after launch?", default=True)
@@ -534,6 +537,10 @@ class AgentShell:
         if not deleted:
             return ShellResult("Run Mode", f"No saved run phrase found: {profile.phrase}", "warning")
         return ShellResult("Run Phrase Removed", f"Removed saved run phrase {profile.phrase}.", "success")
+
+    def setup_result_with_workspace(self, title: str, message: str) -> ShellResult:
+        snapshot = self.actions.workspace_status()
+        return ShellResult(title, Group(message, workspace_status_table(snapshot)), "success", use_panel=False)
 
     def choose_saved_profile(self, title: str) -> RunProfile | None:
         profiles = list(self.actions.run_inventory().profiles.values())

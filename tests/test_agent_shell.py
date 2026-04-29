@@ -9,6 +9,7 @@ from devagent.core.project import ProjectInfo
 from devagent.core.shell import AgentShell, GitIntent, home_menu_choices, interactive_terminal
 from devagent.tools.git_tool import GitRemote
 from devagent.tools.runtime_tool import LaunchSpec
+from devagent.tools.setup_tool import SetupResult
 
 
 class FakeAI:
@@ -135,6 +136,60 @@ def test_shell_quick_command_routes_git_intent(tmp_path: Path) -> None:
     assert result.title == "Commit Complete"
     assert commit_calls == [(None, True)]
     assert "abc123" in str(result.message)
+
+
+def test_shell_workspace_property_tracks_actions_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    third = tmp_path / "third"
+    third.mkdir()
+
+    shell = AgentShell(workspace)
+
+    shell.actions.refresh_workspace(other)
+    assert shell.workspace == other
+
+    shell.workspace = third
+    assert shell.workspace == third
+    assert shell.actions.workspace == third
+
+
+def test_shell_clone_action_shows_workspace_snapshot_and_updates_workspace(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    clone_parent = tmp_path / "clones"
+    clone_parent.mkdir()
+    cloned = clone_parent / "demo"
+    cloned.mkdir()
+    (cloned / "package.json").write_text('{"name":"demo"}', encoding="utf-8")
+
+    shell = AgentShell(workspace)
+
+    monkeypatch.setattr("devagent.core.shell.Prompt.ask", lambda *args, **kwargs: "https://github.com/example/demo")
+    monkeypatch.setattr("devagent.core.shell.choose_directory", lambda *args, **kwargs: clone_parent)
+    confirms = iter([True, False])
+    monkeypatch.setattr("devagent.core.shell.Confirm.ask", lambda *args, **kwargs: next(confirms))
+
+    def fake_clone(repo_url, *, target=None, install_deps=False, open_code=False):
+        assert repo_url == "https://github.com/example/demo"
+        assert target == clone_parent
+        assert install_deps is True
+        assert open_code is False
+        shell.actions.refresh_workspace(cloned)
+        return SetupResult(path=cloned, message="Cloned repo.\nSuggested dependency commands:\n.> npm install")
+
+    shell.actions.clone_repo = fake_clone
+
+    result = shell.clone_setup_action()
+
+    assert shell.workspace == cloned
+    assert result.title == "Clone Complete"
+    assert result.use_panel is False
+    renderables = getattr(result.message, "renderables", ())
+    assert len(renderables) == 2
+    assert "Suggested dependency commands" in str(renderables[0])
 
 
 def test_chat_mode_preserves_phrase_match_and_menu_command(tmp_path: Path) -> None:

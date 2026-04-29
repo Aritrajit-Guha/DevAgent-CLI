@@ -64,3 +64,93 @@ def test_ai_client_reuses_cached_client_and_keeps_env_silent(monkeypatch) -> Non
     assert client.embed(["one"]) == [[0.1, 0.2]]
     assert client_envs == [("gemini-key", None)]
     assert call_envs == [("gemini-key", None), ("gemini-key", None), ("gemini-key", None)]
+
+
+def test_ai_client_retries_transient_503_errors(monkeypatch) -> None:
+    ai_module._CLIENT_CACHE.clear()
+    attempts: list[int] = []
+    sleeps: list[float] = []
+
+    class FakeResponse:
+        text = "ok after retry"
+
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise RuntimeError("503 UNAVAILABLE. This model is currently experiencing high demand.")
+            return FakeResponse()
+
+    class FakeClient:
+        def __init__(self, api_key=None):
+            self.models = FakeModels()
+
+    fake_google = types.ModuleType("google")
+    fake_google.genai = types.SimpleNamespace(Client=FakeClient)
+
+    monkeypatch.setitem(sys.modules, "google", fake_google)
+    monkeypatch.setattr(ai_module.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    client = AIClient(api_key="gemini-key", api_source="GEMINI_API_KEY")
+
+    assert client.complete("hello") == "ok after retry"
+    assert len(attempts) == 3
+    assert sleeps == [0.25, 0.75]
+
+
+def test_ai_client_returns_error_after_repeated_transient_failures(monkeypatch) -> None:
+    ai_module._CLIENT_CACHE.clear()
+    attempts: list[int] = []
+    sleeps: list[float] = []
+
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            attempts.append(1)
+            raise RuntimeError("503 UNAVAILABLE. This model is currently experiencing high demand.")
+
+    class FakeClient:
+        def __init__(self, api_key=None):
+            self.models = FakeModels()
+
+    fake_google = types.ModuleType("google")
+    fake_google.genai = types.SimpleNamespace(Client=FakeClient)
+
+    monkeypatch.setitem(sys.modules, "google", fake_google)
+    monkeypatch.setattr(ai_module.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    client = AIClient(api_key="gemini-key", api_source="GEMINI_API_KEY")
+
+    message = client.complete("hello")
+    assert message is not None
+    assert message.startswith("AI request failed:")
+    assert len(attempts) == 3
+    assert sleeps == [0.25, 0.75]
+
+
+def test_ai_client_does_not_retry_non_transient_errors(monkeypatch) -> None:
+    ai_module._CLIENT_CACHE.clear()
+    attempts: list[int] = []
+    sleeps: list[float] = []
+
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            attempts.append(1)
+            raise RuntimeError("400 INVALID_ARGUMENT")
+
+    class FakeClient:
+        def __init__(self, api_key=None):
+            self.models = FakeModels()
+
+    fake_google = types.ModuleType("google")
+    fake_google.genai = types.SimpleNamespace(Client=FakeClient)
+
+    monkeypatch.setitem(sys.modules, "google", fake_google)
+    monkeypatch.setattr(ai_module.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    client = AIClient(api_key="gemini-key", api_source="GEMINI_API_KEY")
+
+    message = client.complete("hello")
+    assert message is not None
+    assert message.startswith("AI request failed:")
+    assert len(attempts) == 1
+    assert sleeps == []

@@ -22,6 +22,55 @@ def test_sanitize_unified_diff_removes_markdown_fence() -> None:
     assert "```" not in clean
 
 
+def test_sanitize_unified_diff_merges_multiple_fenced_blocks() -> None:
+    raw = """Here is the patch:
+
+```diff
+--- a/index.html
++++ b/index.html
+@@ -1 +1,2 @@
+ <body>
++<button>Tap</button>
+```
+
+Some explanation in between.
+
+```diff
+--- a/assets/js/practice.js
++++ b/assets/js/practice.js
+@@ -1 +1,2 @@
+ const ready = true;
++const tapCount = 0;
+```
+"""
+
+    clean = sanitize_unified_diff(raw)
+
+    assert clean is not None
+    assert clean.count("--- a/") == 2
+    assert "```" not in clean
+    assert "Some explanation in between." not in clean
+    assert "--- a/assets/js/practice.js" in clean
+
+
+def test_sanitize_unified_diff_discards_non_diff_prose_when_recoverable() -> None:
+    raw = """I updated the files below.
+
+--- a/README.md
++++ b/README.md
+@@ -1 +1,2 @@
+ Hello
++Thank you
+
+This concludes the patch."""
+
+    clean = sanitize_unified_diff(raw)
+
+    assert clean is not None
+    assert clean.startswith("--- a/README.md")
+    assert "This concludes the patch." not in clean
+
+
 def test_apply_handles_unicode_diff(tmp_path: Path) -> None:
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     (tmp_path / "README.md").write_text("Give it a star: \u2b50\n", encoding="utf-8")
@@ -188,6 +237,83 @@ def test_apply_fallback_locates_hunk_when_line_numbers_drift(tmp_path: Path, mon
 
     text = (tmp_path / "README.md").read_text(encoding="utf-8")
     assert text.endswith("Author\n\nAritrajit Guha\n\n---\nThank you for checking out this project!\n")
+
+
+class MultiBlockDiffAI:
+    def __init__(self) -> None:
+        self.available = True
+
+    def complete(self, prompt: str, *, deep: bool = False, system_instruction: str | None = None) -> str:
+        return """```diff
+--- a/index.html
++++ b/index.html
+@@ -1 +1,2 @@
+ <body>
++<button>Tap</button>
+```
+```diff
+--- a/assets/js/practice.js
++++ b/assets/js/practice.js
+@@ -1 +1,2 @@
+ const ready = true;
++const tapCount = 0;
+```"""
+
+    def embed(self, texts):
+        return None
+
+
+def test_propose_normalizes_multi_block_fenced_diff(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "index.html").write_text("<body>\n", encoding="utf-8")
+    assets_dir = tmp_path / "assets" / "js"
+    assets_dir.mkdir(parents=True)
+    (assets_dir / "practice.js").write_text("const ready = true;\n", encoding="utf-8")
+
+    monkeypatch.setattr(edit_tool_module.AIClient, "from_env", classmethod(lambda cls: MultiBlockDiffAI()))
+
+    proposal = EditAgent(tmp_path).propose("add a tap counter")
+
+    assert proposal.diff is not None
+    assert proposal.diff.count("--- a/") == 2
+    assert "```" not in proposal.diff
+
+
+def test_apply_succeeds_for_sanitized_multi_block_fenced_diff(tmp_path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "index.html").write_text("<body>\n</body>\n", encoding="utf-8")
+    assets_dir = tmp_path / "assets" / "js"
+    assets_dir.mkdir(parents=True)
+    (assets_dir / "practice.js").write_text("const ready = true;\n", encoding="utf-8")
+
+    raw = """```diff
+--- a/index.html
++++ b/index.html
+@@ -1,2 +1,3 @@
+ <body>
++<button>Tap</button>
+ </body>
+```
+```diff
+--- a/assets/js/practice.js
++++ b/assets/js/practice.js
+@@ -1 +1,2 @@
+ const ready = true;
++const tapCount = 0;
+```"""
+
+    clean = sanitize_unified_diff(raw)
+    assert clean is not None
+
+    proposal = EditProposal(
+        instruction="Add a tap counter button",
+        diff=clean,
+        message="Patch generated.",
+    )
+
+    EditAgent(tmp_path).apply(proposal)
+
+    assert "<button>Tap</button>" in (tmp_path / "index.html").read_text(encoding="utf-8")
+    assert "const tapCount = 0;" in (assets_dir / "practice.js").read_text(encoding="utf-8")
 
 
 class PromptCapturingAI:

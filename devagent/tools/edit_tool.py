@@ -10,6 +10,24 @@ from devagent.context.retriever import Retriever
 from devagent.tools.ai import AIClient
 
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$")
+PATCH_START_MARKERS = ("diff --git ", "--- a/", "--- /", "Index: ")
+PATCH_METADATA_MARKERS = PATCH_START_MARKERS + (
+    "+++ b/",
+    "+++ /",
+    "@@ ",
+    "index ",
+    "new file mode",
+    "deleted file mode",
+    "similarity index",
+    "rename from ",
+    "rename to ",
+    "old mode ",
+    "new mode ",
+    "copy from ",
+    "copy to ",
+    "Binary files ",
+)
+RAW_FENCE_RE = re.compile(r"^\s*```[\w-]*\s*$")
 
 
 @dataclass(frozen=True)
@@ -109,22 +127,44 @@ class EditAgent:
 
 
 def sanitize_unified_diff(raw: str) -> str | None:
-    text = raw.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
+    lines = [line for line in raw.splitlines() if not RAW_FENCE_RE.match(line)]
+    cleaned_lines: list[str] = []
+    capturing = False
+    in_hunk = False
 
-    start_markers = ("diff --git ", "--- a/", "--- /", "Index: ")
-    lines = text.splitlines()
-    for index, line in enumerate(lines):
-        if line.startswith(start_markers):
-            cleaned = "\n".join(lines[index:]).strip()
-            return f"{cleaned}\n" if cleaned else None
-    return None
+    for line in lines:
+        if line.startswith(PATCH_START_MARKERS):
+            capturing = True
+            in_hunk = False
+            cleaned_lines.append(line)
+            continue
+
+        if not capturing:
+            continue
+
+        if line.startswith(PATCH_METADATA_MARKERS):
+            in_hunk = line.startswith("@@ ")
+            cleaned_lines.append(line)
+            continue
+
+        if in_hunk:
+            if line.startswith((" ", "+", "-", "\\ No newline at end of file")):
+                cleaned_lines.append(line)
+                continue
+            if not line.strip():
+                continue
+            in_hunk = False
+            continue
+
+    if not any(line.startswith(("--- ", "diff --git ", "Index: ")) for line in cleaned_lines):
+        return None
+    if not any(line.startswith("+++ ") for line in cleaned_lines):
+        return None
+    if not any(line.startswith("@@ ") for line in cleaned_lines):
+        return None
+
+    cleaned = "\n".join(cleaned_lines).strip()
+    return f"{cleaned}\n" if cleaned else None
 
 
 def format_git_apply_error(label: str, result: subprocess.CompletedProcess[bytes]) -> str:
