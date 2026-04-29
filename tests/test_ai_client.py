@@ -241,6 +241,47 @@ def test_ai_client_filters_gemini_generation_and_embedding_models(monkeypatch) -
     ]
 
 
+def test_ai_client_filters_gemini_models_from_supported_actions_shape(monkeypatch) -> None:
+    _clear_ai_caches()
+
+    class FakeModels:
+        def list(self):
+            return [
+                {
+                    "name": "models/gemini-2.5-flash",
+                    "display_name": "Gemini 2.5 Flash",
+                    "supported_actions": ["generateContent", "countTokens"],
+                },
+                {
+                    "name": "models/gemini-2.5-pro",
+                    "display_name": "Gemini 2.5 Pro",
+                    "supported_actions": ["generateContent"],
+                },
+                {
+                    "name": "models/gemini-embedding-001",
+                    "display_name": "Gemini Embedding 001",
+                    "supported_actions": ["embedContent"],
+                },
+            ]
+
+    class FakeClient:
+        def __init__(self, api_key=None):
+            self.models = FakeModels()
+
+    fake_google = types.ModuleType("google")
+    fake_google.genai = types.SimpleNamespace(Client=FakeClient)
+    monkeypatch.setitem(sys.modules, "google", fake_google)
+
+    client = AIClient(provider="gemini", api_key="gemini-key", api_source="GEMINI_API_KEY", available_providers=("gemini",))
+    models = client.list_models(provider="gemini", refresh=True)
+
+    assert [(model.id, model.capabilities) for model in models] == [
+        ("gemini-2.5-flash", ("generate",)),
+        ("gemini-2.5-pro", ("generate",)),
+        ("gemini-embedding-001", ("embed",)),
+    ]
+
+
 def test_ai_client_lists_xai_models_from_language_models_endpoint(monkeypatch) -> None:
     _clear_ai_caches()
     monkeypatch.setattr(

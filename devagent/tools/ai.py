@@ -606,11 +606,13 @@ def normalize_gemini_model(raw) -> DiscoveredModel:
     methods = [
         value.casefold()
         for value in normalize_string_values(
-        extract_attr(raw, "supported_generation_methods")
-        or extract_attr(raw, "supportedGenerationMethods")
-        or extract_attr(raw, "supported_methods")
-        or extract_attr(raw, "supportedMethods")
-        or []
+            extract_attr(raw, "supported_actions")
+            or extract_attr(raw, "supportedActions")
+            or extract_attr(raw, "supported_generation_methods")
+            or extract_attr(raw, "supportedGenerationMethods")
+            or extract_attr(raw, "supported_methods")
+            or extract_attr(raw, "supportedMethods")
+            or []
         )
     ]
     capabilities: list[str] = []
