@@ -4,6 +4,11 @@ This guide explains the current DevAgent CLI command surface with examples.
 It is based on the live command definitions in
 `devagent/cli/main.py`.
 
+Related docs:
+
+- [README.md](README.md) for installation, onboarding, and feature overview
+- [SHELL_GUIDE.md](SHELL_GUIDE.md) for the interactive shell surface
+
 ## What DevAgent does
 
 DevAgent is a local-first developer assistant for:
@@ -624,4 +629,11 @@ devagent git status
 devagent git commit
 devagent git push
 devagent git pr create
+```
+
+If you prefer prompts and menus over explicit commands, open the interactive
+shell instead:
+
+```cmd
+devagent
 ```

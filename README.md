@@ -1,269 +1,454 @@
 # DevAgent CLI
 
-DevAgent CLI is a local-first agentic developer assistant. It binds to a project
-folder, indexes source code, answers repo-aware questions, proposes controlled
-code edits, and automates common Git workflows.
+DevAgent CLI is a local-first developer assistant for real project work. It can
+bind to a workspace, index the codebase, answer repo-aware questions, propose
+diff-first edits, guide common Git flows, launch local services, and let you
+pick which AI provider and models power those workflows.
 
-## Install
+![DevAgent shell home](docs/assets/shell-home.svg)
 
-Prerequisites:
+## Why this project exists
 
-- Python 3.11+
+Raw Git, raw shells, and raw AI chat windows all work, but they each leave a
+gap:
+
+- Git is powerful, but it is not especially friendly when you want the common
+  flow to feel calm and obvious.
+- A plain AI chat window can answer questions, but it often loses project
+  grounding unless you keep re-explaining the repo.
+- Local app setup is repetitive, and people keep retyping the same commands to
+  start projects, inspect status, and move between Git tasks.
+
+DevAgent exists to close those gaps without trying to replace your whole tool
+stack. It gives you:
+
+- a guided shell when you want prompts instead of memorizing commands
+- a direct CLI when you already know the exact action you want
+- repo-aware chat and edit flows that work against a bound workspace
+- a simpler Git layer for common pulls, pushes, commits, PRs, and merge
+  recovery
+- AI provider selection without hand-editing model choices every time
+
+## What DevAgent can do
+
+### Interactive shell
+
+Running `devagent` opens a menu-driven shell when a workspace is already bound.
+That shell is designed for the "just help me do the next thing" workflow:
+
+- `AI` for provider and model selection
+- `Chat` for repo-aware questions
+- `Git` for guided common Git tasks
+- `Run` for starting services and saved launch phrases
+- `Repo` for status, indexing, packages, and inspect
+- `Setup` for clone and publish flows
+- `Edit` for diff-first code changes
+- `Watch` for file-change monitoring
+- `Quick command / phrase` for natural-language shortcuts
+
+### Direct CLI
+
+If you prefer explicit commands, DevAgent also exposes a full CLI surface. The
+main families are:
+
+- `ai`
+- `workspace`
+- `setup`
+- `new`
+- `chat`
+- `run`
+- `git`
+- `commit`
+- `edit`
+- `index`
+- `packages`
+- `inspect`
+- `watch`
+
+The detailed command reference lives in [CLI_GUIDE.md](CLI_GUIDE.md).
+
+### Repo-aware chat
+
+`devagent chat "..."` answers questions against the active workspace instead of
+just guessing from general knowledge. This is why binding and indexing matter:
+they give the assistant repo context before it starts talking.
+
+Deep chat mode goes further. It uses the saved deep model for the active
+provider and asks for broader retrieval, so the answer is both richer and more
+grounded in more of the codebase.
+
+### Diff-first edit flow
+
+`devagent edit "..."` does not silently rewrite files. It proposes a unified
+diff first, shows you what will change, and only applies it after confirmation
+unless you pass `--yes`.
+
+That behavior exists to keep AI edits inspectable instead of magical.
+
+![Edit proposal preview](docs/assets/edit-diff-preview.svg)
+
+### Guided Git flows
+
+DevAgent focuses on common Git work:
+
+- see what changed
+- stage all or specific paths
+- create and switch branches
+- generate better commit messages from the actual diff
+- pull the current branch from its tracked remote
+- push the current branch cleanly
+- preview and open PRs
+- inspect, abort, and continue merges
+
+The goal is not to replace every advanced Git command. The goal is to make the
+everyday path simpler than raw Git plumbing.
+
+### Run phrases and service launch
+
+DevAgent can detect launchable services in a workspace, start them, and save
+natural-language phrases for repeated runs. This is why `run save` exists: so
+you can teach DevAgent how you like to start a project without cluttering the
+project itself.
+
+### AI provider and model selection
+
+DevAgent currently supports these providers:
+
+- Gemini
+- xAI
+
+It can detect providers from the API keys you already have, list visible models
+for those providers, and save a default provider/model choice for chat, edit,
+and related AI-backed features.
+
+![AI status snapshot](docs/assets/ai-status.svg)
+
+## Install with `pipx`
+
+### Prerequisites
+
+Install these first:
+
+- Python 3.11 or newer
+- `pipx`
 - Git
-- GitHub CLI (`gh`) for publishing local projects to GitHub
-- Gemini API key for AI-backed chat, embeddings, edit proposals, and guidance
-- Optional: Visual Studio Code, Node.js LTS
+- GitHub CLI (`gh`) if you want DevAgent to publish local projects or create
+  pull requests through GitHub
 
-Create a virtual environment and install the CLI:
+### Fresh install
 
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -e ".[dev]"
+```cmd
+pipx install git+https://github.com/Aritrajit-Guha/DevAgent-CLI.git
 ```
 
-For AI-backed chat, edit proposals, embeddings, and commit messages:
+### Upgrade an existing install
 
-```bash
+```cmd
+pipx upgrade devagent-cli
+```
+
+### Reinstall from GitHub
+
+If `pipx upgrade` does not pull the latest repo state you expect, do a clean
+reinstall:
+
+```cmd
+pipx uninstall devagent-cli
+pipx install git+https://github.com/Aritrajit-Guha/DevAgent-CLI.git
+```
+
+Use reinstall when you want to be absolutely sure your `pipx` environment is
+using the latest GitHub source instead of an older cached state.
+
+## API keys and AI setup
+
+The simplest recommended setup is Gemini-only.
+
+### Supported provider keys
+
+DevAgent currently looks for these provider keys:
+
+- `GEMINI_API_KEY`
+- `GOOGLE_API_KEY`
+- `XAI_API_KEY`
+
+### Gemini model environment variables
+
+These are the current Gemini model-related environment variables:
+
+- `GEMINI_MODEL_FAST`
+- `GEMINI_MODEL`
+- `GEMINI_MODEL_DEEP`
+- `GEMINI_EMBEDDING_MODEL`
+
+`GEMINI_MODEL_FAST` and `GEMINI_MODEL` both act as the chat-model override.
+
+### Simplest practical setup
+
+Create a `.env` file from the example:
+
+```cmd
 copy .env.example .env
-# set GEMINI_API_KEY in .env
 ```
 
-## Commands
+Then set at least:
 
-```bash
-devagent --help
-devagent new project
-devagent workspace bind .
+```dotenv
+GEMINI_API_KEY=your_key_here
+```
+
+If you only have a Gemini key, DevAgent will still work fine and will only use
+Gemini.
+
+### Choosing provider and models from DevAgent
+
+Use these commands:
+
+```cmd
+devagent ai status
+devagent ai models --refresh
+devagent ai use --provider gemini
+devagent ai use --provider gemini --model gemini-2.5-flash --deep-model gemini-2.5-pro --embedding-model gemini-embedding-001
+```
+
+If you also have xAI configured:
+
+```cmd
+devagent ai use --provider xai --model grok-3-mini --deep-model grok-3-mini
+```
+
+### Important caveat about provider availability
+
+A provider key being present does not automatically mean the provider is usable
+right now. For example:
+
+- the key may be valid but tied to an account with no credits
+- the provider may allow auth but block model access
+- model discovery may be unavailable temporarily
+
+DevAgent now treats those as warnings instead of crashing, but the docs should
+set the expectation clearly: configured and available are not always the same
+thing.
+
+## First run
+
+### 1. Bind a workspace
+
+```cmd
+devagent workspace bind "D:\Vs code Projects\Rock-Paper-Scissor"
 devagent workspace status
-devagent setup clone https://github.com/user/repo
-devagent clone https://github.com/user/repo
-devagent setup publish .
+```
+
+Most DevAgent commands work against the currently bound workspace.
+
+### 2. Check AI status
+
+```cmd
+devagent ai status
+```
+
+This tells you:
+
+- which providers are configured
+- which provider is selected
+- which chat, deep, and embedding models DevAgent will use
+
+### 3. Build the code index
+
+```cmd
 devagent index
-devagent chat "Explain the project structure"
-devagent packages
-devagent git
-devagent run
-devagent run start
-devagent run start --open-browser
-devagent run save "I order you to start in the name of jesus"
+```
+
+The index is what powers grounded repo chat and edit retrieval. Without it,
+DevAgent has less useful repo context.
+
+### 4. Ask the repo a question
+
+```cmd
+devagent chat "Explain this project"
+devagent chat "Where is the CLI implemented?" --deep
+```
+
+### 5. Open the shell
+
+```cmd
+devagent
+```
+
+If no workspace is bound, or the saved workspace path no longer exists, DevAgent
+shows recovery guidance instead of crashing.
+
+## Common workflows
+
+### Use the shell when you want guidance
+
+Open it with:
+
+```cmd
+devagent
+```
+
+Use the shell when you want:
+
+- menus
+- guided prompts
+- plain-English Git choices
+- natural-language quick commands
+
+See [SHELL_GUIDE.md](SHELL_GUIDE.md) for the full shell reference.
+
+### Ask repo questions from the CLI
+
+```cmd
+devagent chat "Explain the architecture"
+devagent chat "Which files control the shell UX?"
+devagent chat "Give me a deeper summary of the Git flow" --deep
+```
+
+### Make a safe code change
+
+```cmd
+devagent edit "Add a thank you line at the end of README.md"
+```
+
+DevAgent shows the diff first, then asks whether to apply it.
+
+### Stage, suggest, commit, push, and open a PR
+
+```cmd
+devagent git status
 devagent git add
-devagent git commit
-devagent git pr preview
-devagent edit "Add logging to login function"
-devagent git status
-devagent git branch create feature/login
-devagent watch
-devagent inspect
-```
-
-## Feature Branch Plan
-
-The intended development flow is one branch per feature, then merge into `main`:
-
-1. `codex/project-scaffold`
-2. `codex/workspace-binding`
-3. `codex/smart-project-setup`
-4. `codex/repo-aware-chat`
-5. `codex/code-action-agent`
-6. `codex/git-assistant`
-7. `codex/commit-generator`
-8. `codex/watch-mode`
-9. `codex/safety-insights`
-
-## MVP Notes
-
-- The indexer stores local JSON records in your user-level DevAgent cache.
-- If Gemini credentials are available, embeddings and LLM responses are used.
-- Without credentials, DevAgent falls back to keyword retrieval and deterministic
-  summaries so demos remain usable offline.
-- Controlled edits always show a diff and require explicit confirmation before
-  applying changes.
-- The current MVP uses a lightweight JSON index, so installs stay fast and do
-  not require a local vector database.
-
-## Local Testing Guide
-
-Activate the virtual environment:
-
-```powershell
-.\.venv\Scripts\activate
-```
-
-Confirm the CLI is installed:
-
-```powershell
-devagent --help
-```
-
-Run the automated tests:
-
-```powershell
-python -m pytest
-```
-
-Bind this repo as your first workspace:
-
-```powershell
-devagent workspace bind .
-devagent workspace status
-```
-
-Build the local code index:
-
-```powershell
-devagent index
-```
-
-Test repo-aware chat without Gemini:
-
-```powershell
-devagent chat "Explain the project structure"
-```
-
-Then test with Gemini:
-
-```powershell
-copy .env.example .env
-notepad .env
-```
-
-Set `GEMINI_API_KEY`, then run:
-
-```powershell
-devagent index
-devagent chat "Where is the CLI implemented?"
-```
-
-Test Git and inspection helpers:
-
-```powershell
-devagent git status
 devagent commit suggest
-devagent inspect
-```
-
-Inspect Node dependencies directly:
-
-```powershell
-devagent packages
-```
-
-On Windows `cmd.exe`, use `type package.json` instead of Unix `cat package.json`.
-In PowerShell, use `Get-Content package.json`.
-
-Test controlled edit mode:
-
-```powershell
-devagent edit "Add a short comment above the workspace bind command"
-```
-
-DevAgent will show a diff and ask before applying it.
-
-## Git Assistant
-
-Run this first to see the Git actions in plain language:
-
-```powershell
-devagent git
-```
-
-In a normal terminal, this opens an interactive selector with arrow-key navigation.
-If arrow-mode is unavailable, DevAgent falls back to a simple numbered menu.
-
-DevAgent now supports:
-
-```powershell
-devagent git status
-devagent git add
-devagent git add client/package.json
-devagent git branch create feature/login
-devagent git branch switch main
 devagent git commit
-devagent git pull
 devagent git push
 devagent git pr preview
 devagent git pr create
-devagent git merge conflicts
-devagent git merge abort
-devagent git merge continue
 ```
 
-`devagent git commit` stages all changes by default and auto-generates a commit
-message unless you pass `--message`.
+### Clone or publish a project
 
-## Guided Project Setup
+Clone an existing repo:
 
-For a user-friendly first run, use:
+```cmd
+devagent setup clone https://github.com/user/repo --target "D:\Projects" --install-deps
+```
 
-```powershell
+Publish a local project:
+
+```cmd
+devagent setup publish "D:\Projects\MyApp" --name myapp --private
+```
+
+Guided version:
+
+```cmd
 devagent new project
 ```
 
-DevAgent asks whether you already have a GitHub repo or have a local copy to publish.
+### Launch your app
 
-If you choose GitHub, it asks for the normal GitHub repo page URL, lets you choose
-where on your PC to clone it, converts the URL to the clone URL, clones the repo,
-binds the workspace, detects the project type, and can offer dependency install or
-opening VS Code.
+```cmd
+devagent run start --open-browser
+devagent run save "Start the app" --open-browser
+devagent run start "Start the app"
+```
 
-Dependency install checks the repo root and nested app folders such as
-`client/package.json` and `server/package.json`, then runs the right install
-command in each folder. For Python apps, DevAgent creates a local `.venv`
-inside that app folder first and installs into that virtual environment instead
-of the global Python interpreter.
+## Which guide should you read?
 
-If you choose local, it lets you choose the local project folder, creates a GitHub
-repo using `gh`, adds `origin`, commits if needed, pushes, and binds the workspace.
+- [CLI_GUIDE.md](CLI_GUIDE.md): every explicit CLI command with examples
+- [SHELL_GUIDE.md](SHELL_GUIDE.md): every shell mode, shell command, and guided
+  interaction pattern
 
-## Runtime Agent
+Use this README for onboarding and product understanding. Use the other two
+guides as task references once you are already moving.
 
-DevAgent can now act more like a local teammate by launching your workspace
-services for you instead of only describing what to run.
+## Troubleshooting and gotchas
+
+### `devagent` says no workspace is bound
+
+Bind one first:
+
+```cmd
+devagent workspace bind "D:\Projects\MyApp"
+```
+
+### The old bound workspace was deleted
+
+DevAgent now treats this as a recoverable state. Rebind it:
+
+```cmd
+devagent workspace bind "D:\Projects\MyApp"
+```
+
+or start fresh with:
+
+```cmd
+devagent new project
+```
+
+### `devagent ai` shows provider warnings
+
+That usually means one of these:
+
+- the API key is missing
+- the API key is valid but the account has no credits or license access
+- the provider is temporarily unavailable
+
+Try:
+
+```cmd
+devagent ai status --refresh
+devagent ai models --refresh
+```
+
+### `devagent status` does not exist
 
 Use:
 
-```powershell
-devagent run
+```cmd
+devagent workspace status
 ```
 
-That shows:
+### Edit apply failed after a valid-looking diff
 
-- auto-detected launch targets such as `frontend> npm run dev`
-- Python app targets such as `backend> python main.py`
-- saved launch phrases for your workspace
+Recent fixes hardened the apply pipeline, but if a proposed diff still fails:
 
-To launch the detected stack in separate terminals:
+- retry the edit once
+- make the instruction more specific about the target file
+- inspect the proposed diff before applying
 
-```powershell
-devagent run start
-```
+### `devagent` behaves differently in one terminal than another
 
-To launch the stack and open the detected local app in your browser:
+That usually means the shell executable is the same but the environment is not.
+Check:
 
-```powershell
-devagent run start --open-browser
-```
+- whether `PATH` changed after the terminal host was opened
+- whether provider keys are available in that session
+- whether `pipx` paths are visible in that session
 
-On Windows, Python services open in a new `cmd.exe` terminal with the local
-`.venv` activated automatically. If the `.venv` does not exist yet but the app
-has `requirements.txt` or `pyproject.toml`, DevAgent bootstraps that `.venv`
-before starting the service.
+## Local development
 
-To remember a startup phrase for the whole detected stack:
+If you want to work on DevAgent itself instead of only using it through `pipx`,
+set up a local editable environment:
 
 ```powershell
-devagent run save "I order you to start in the name of jesus"
-devagent run start "I order you to start in the name of jesus" --open-browser
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install -e ".[dev]"
 ```
 
-To remember a custom one-off command:
+Useful local checks:
 
 ```powershell
-devagent run save "wake the frontend" --command "npm run dev" --cwd frontend
-devagent run start "wake the frontend"
+devagent --help
+devagent workspace bind .
+devagent workspace status
+python -m pytest
 ```
 
-These phrases are stored in DevAgent's workspace cache, not in your project's
-`package.json`, so the app's own scripts stay clean while DevAgent still feels
-agentic and personal.
+## Final note
+
+DevAgent is meant to make local developer workflows feel more grounded, more
+guided, and less brittle. The shell, the CLI, the Git flows, and the AI layer
+all exist for the same reason: to help you stay in flow while still keeping the
+work visible and controlled.
