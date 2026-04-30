@@ -489,7 +489,12 @@ def chat(
     deep: bool = typer.Option(False, "--deep", help="Use broader retrieval and the saved deep model for the active provider when configured."),
     new_session: bool = typer.Option(False, "--new-session", help="Clear saved workspace chat context before answering."),
 ) -> None:
-    answer = _actions().chat(question, deep=deep, new_session=new_session)
+    actions = _actions()
+    if interactive_terminal():
+        with console.status("Thinking...") as status:
+            answer = actions.chat(question, deep=deep, new_session=new_session, progress_callback=status.update)
+    else:
+        answer = actions.chat(question, deep=deep, new_session=new_session)
     console.print(app_panel(render_chat_markdown(answer), "DevAgent Response", tone="info"))
 
 
@@ -575,13 +580,21 @@ def edit(
     yes: bool = typer.Option(False, "--yes", "-y", help="Apply the proposed diff without prompting."),
 ) -> None:
     actions = _actions()
-    proposal = actions.edit_propose(instruction)
+    if interactive_terminal():
+        with console.status("Thinking...") as status:
+            proposal = actions.edit_propose(instruction, progress_callback=status.update)
+    else:
+        proposal = actions.edit_propose(instruction)
     console.print(app_panel(proposal.diff or proposal.message, "Proposed Change", tone="info"))
     if not proposal.diff:
         raise typer.Exit(code=1)
     if yes or typer.confirm("Apply this diff?"):
         try:
-            actions.edit_apply(proposal)
+            if interactive_terminal():
+                with console.status("Applying patch...") as status:
+                    actions.edit_apply(proposal, progress_callback=status.update)
+            else:
+                actions.edit_apply(proposal)
         except RuntimeError as exc:
             console.print(app_panel(str(exc), "Edit Failed", tone="error", expand=False))
             console.print(toned_message("No files were changed.", "warning"))

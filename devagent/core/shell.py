@@ -256,7 +256,11 @@ class AgentShell:
             except (EOFError, KeyboardInterrupt):
                 console.print()
                 return
-            result = self.handle_chat_input(user_input)
+            if self._chat_uses_generation(user_input):
+                with console.status("Thinking...") as status:
+                    result = self.handle_chat_input(user_input, progress_callback=status.update)
+            else:
+                result = self.handle_chat_input(user_input)
             if not result:
                 continue
             self.display_result(result)
@@ -349,20 +353,23 @@ class AgentShell:
             instruction = Prompt.ask("Edit instruction").strip()
             if not instruction:
                 return
-            proposal = self.actions.edit_propose(instruction)
+            with console.status("Thinking...") as status:
+                proposal = self.actions.edit_propose(instruction, progress_callback=status.update)
             self.display_result(ShellResult("Proposed Change", proposal.diff or proposal.message, "info"))
             if not proposal.diff:
-                return
+                continue
             if Confirm.ask("Apply this diff?", default=False):
                 try:
-                    self.actions.edit_apply(proposal)
+                    with console.status("Applying patch...") as status:
+                        self.actions.edit_apply(proposal, progress_callback=status.update)
                 except RuntimeError as exc:
                     self.display_result(ShellResult("Edit Failed", str(exc), "error"))
+                    continue
                 else:
                     self.display_result(ShellResult("Edit Applied", "Applied the proposed change.", "success"))
                 return
             self.display_result(ShellResult("Edit Skipped", "No files were changed.", "warning"))
-            return
+            continue
 
     def watch_mode(self) -> None:
         interval = float(Prompt.ask("Polling interval", default="1.0"))
@@ -380,7 +387,7 @@ class AgentShell:
             result = ShellResult("Quick Command Failed", str(exc), "error")
         self.display_result(result)
 
-    def handle_input(self, raw_text: str) -> ShellResult | None:
+    def handle_input(self, raw_text: str, *, progress_callback=None) -> ShellResult | None:
         text = raw_text.strip()
         if not text:
             return None
@@ -404,10 +411,10 @@ class AgentShell:
         if git_intent:
             return self.perform_git_intent(git_intent)
 
-        answer = self.actions.chat(text, deep=self.deep_mode)
+        answer = self.actions.chat(text, deep=self.deep_mode, progress_callback=progress_callback)
         return ShellResult("DevAgent", render_chat_markdown(answer), "info")
 
-    def handle_chat_input(self, raw_text: str) -> ShellResult | None:
+    def handle_chat_input(self, raw_text: str, *, progress_callback=None) -> ShellResult | None:
         text = raw_text.strip()
         if not text:
             return None
@@ -416,8 +423,14 @@ class AgentShell:
         matched_profile = self.actions.find_run_profile(text)
         if matched_profile:
             return self.run_profile_result(matched_profile)
-        answer = self.actions.chat(text, deep=self.deep_mode)
+        answer = self.actions.chat(text, deep=self.deep_mode, progress_callback=progress_callback)
         return ShellResult("DevAgent", render_chat_markdown(answer), "info")
+
+    def _chat_uses_generation(self, raw_text: str) -> bool:
+        text = raw_text.strip()
+        if not text or text.startswith("/"):
+            return False
+        return self.actions.find_run_profile(text) is None
 
     def handle_chat_command(self, text: str) -> ShellResult:
         command = text.strip().casefold()

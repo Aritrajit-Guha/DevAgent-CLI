@@ -722,7 +722,7 @@ class GitTool:
                 "If conventional commits are requested, keep the prefix in the subject."
             ),
         )
-        if not response or response.startswith("AI request failed:"):
+        if not response:
             return None
         return parse_ai_commit_suggestion(response, fallback)
 

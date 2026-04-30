@@ -8,7 +8,7 @@ from devagent.context.retriever import Retriever
 from devagent.core.project import detect_project
 from devagent.core.session_store import SessionStore
 from devagent.core.structured_answers import answer_structured_question
-from devagent.tools.ai import AIClient
+from devagent.tools.ai import AIClient, GenerationProgressCallback
 
 
 class RepoAgent:
@@ -20,7 +20,14 @@ class RepoAgent:
     def clear_session(self) -> None:
         self.sessions.clear()
 
-    def answer(self, question: str, *, deep: bool = False, new_session: bool = False) -> str:
+    def answer(
+        self,
+        question: str,
+        *,
+        deep: bool = False,
+        new_session: bool = False,
+        progress_callback: GenerationProgressCallback | None = None,
+    ) -> str:
         if new_session:
             self.clear_session()
         session = self.sessions.load()
@@ -62,10 +69,15 @@ class RepoAgent:
                 context=context,
                 deep=deep,
             )
-            response = self.ai.complete(prompt, deep=deep, system_instruction=system_instruction)
-            if response:
-                self.sessions.append_exchange(question, response)
-                return response
+            response = self.ai.generate(
+                prompt,
+                deep=deep,
+                system_instruction=system_instruction,
+                progress_callback=progress_callback,
+            )
+            if response.succeeded and response.text:
+                self.sessions.append_exchange(question, response.text)
+                return response.text
 
         if not chunks:
             return "I could not find matching code context. Run `devagent index` and try a more specific question."
@@ -77,6 +89,7 @@ class RepoAgent:
             session=session,
             chunks=chunks,
             relevant_files=relevant_files,
+            ai_issue=response.final_error if self.ai.available else None,
         )
         self.sessions.append_exchange(question, fallback)
         return fallback
@@ -208,10 +221,10 @@ def build_prompt(*, question: str, intent: str, queries: list[str], project, ses
     )
 
 
-def build_grounded_fallback(*, question: str, intent: str, project, session, chunks, relevant_files: list[str]) -> str:
+def build_grounded_fallback(*, question: str, intent: str, project, session, chunks, relevant_files: list[str], ai_issue: str | None = None) -> str:
     provider_label = AIClient.from_env().provider_label
     lines = [
-        f"I found grounded repo context for your {intent} question, but {provider_label} is not available right now.",
+        f"I found grounded repo context for your {intent} question, but {provider_label} could not finish the AI synthesis right now.",
         "",
         "What I found:",
         *(relevant_files or ["- No indexed chunks matched directly."]),
@@ -219,6 +232,8 @@ def build_grounded_fallback(*, question: str, intent: str, project, session, chu
         f"Project types: {', '.join(project.project_types) or 'unknown'}",
         f"Package files: {', '.join(project.package_files) or 'none'}",
     ]
+    if ai_issue:
+        lines.extend(["", f"Why the AI answer fell back: {ai_issue}"])
     if session.summary:
         lines.extend(["", f"Conversation memory: {session.summary}"])
     if chunks:

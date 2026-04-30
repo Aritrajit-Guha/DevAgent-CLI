@@ -1,6 +1,7 @@
 import subprocess
 from pathlib import Path
 
+import devagent.tools.ai as ai_module
 import devagent.tools.edit_tool as edit_tool_module
 from devagent.context.indexer import CodeIndexer
 from devagent.tools.edit_tool import EditAgent, EditProposal, sanitize_unified_diff
@@ -243,6 +244,15 @@ class MultiBlockDiffAI:
     def __init__(self) -> None:
         self.available = True
 
+    def generate(self, prompt: str, *, deep: bool = False, system_instruction: str | None = None, progress_callback=None):
+        return ai_module.GenerationResult(
+            text=self.complete(prompt, deep=deep, system_instruction=system_instruction),
+            provider="gemini",
+            model="gemini-2.5-flash",
+            used_deep_mode=deep,
+            attempts=1,
+        )
+
     def complete(self, prompt: str, *, deep: bool = False, system_instruction: str | None = None) -> str:
         return """```diff
 --- a/index.html
@@ -321,6 +331,15 @@ class PromptCapturingAI:
         self.available = True
         self.prompt = ""
 
+    def generate(self, prompt: str, *, deep: bool = False, system_instruction: str | None = None, progress_callback=None):
+        return ai_module.GenerationResult(
+            text=self.complete(prompt, deep=deep, system_instruction=system_instruction),
+            provider="gemini",
+            model="gemini-2.5-flash",
+            used_deep_mode=deep,
+            attempts=1,
+        )
+
     def complete(self, prompt: str, *, deep: bool = False, system_instruction: str | None = None) -> str:
         self.prompt = prompt
         return "NO_PATCH"
@@ -347,3 +366,131 @@ def test_propose_rebuilds_stale_index_before_generating_diff(tmp_path: Path, mon
     assert proposal.diff is None
     assert "agentic and personal." in fake_ai.prompt
     assert "Aritrajit Guha" not in fake_ai.prompt
+
+
+class FailedGenerationAI:
+    def __init__(self) -> None:
+        self.available = True
+
+    def generate(self, prompt: str, *, deep: bool = False, system_instruction: str | None = None, progress_callback=None):
+        return ai_module.GenerationResult(
+            text=None,
+            provider="gemini",
+            model="gemini-2.5-flash",
+            used_deep_mode=deep,
+            attempts=3,
+            fallback_notes=("Gemini stayed busy. Falling back to `gemini-2.5-flash`...",),
+            error_kind=ai_module.TRANSIENT_SERVER_ERROR,
+            final_error="Gemini is still experiencing high demand.",
+        )
+
+
+def test_propose_returns_friendly_failure_message_when_generation_exhausts_retries(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "README.md").write_text("Hello\n", encoding="utf-8")
+    monkeypatch.setattr(edit_tool_module.AIClient, "from_env", classmethod(lambda cls: FailedGenerationAI()))
+
+    proposal = EditAgent(tmp_path).propose("add a thank you")
+
+    assert proposal.diff is None
+    assert "high demand" in proposal.message
+    assert "Recovery notes:" in proposal.message
+
+
+class RepairingAI:
+    def __init__(self, responses: list[str]) -> None:
+        self.available = True
+        self._responses = responses
+
+    def generate(self, prompt: str, *, deep: bool = False, system_instruction: str | None = None, progress_callback=None):
+        text = self._responses.pop(0) if self._responses else "NO_PATCH"
+        return ai_module.GenerationResult(
+            text=text,
+            provider="gemini",
+            model="gemini-2.5-flash",
+            used_deep_mode=deep,
+            attempts=1,
+        )
+
+
+def test_apply_repairs_diff_after_git_apply_and_fallback_fail(tmp_path: Path, monkeypatch) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "README.md").write_text("Hello\n", encoding="utf-8")
+
+    broken = """--- a/README.md
++++ b/README.md
+@@ -2 +2 @@
+-Goodbye
++Hello there
+"""
+    repaired = """--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-Hello
++Hello there
+"""
+    monkeypatch.setattr(edit_tool_module.AIClient, "from_env", classmethod(lambda cls: RepairingAI([repaired])))
+
+    def fake_run(args, cwd=None, input=None, capture_output=None):
+        return subprocess.CompletedProcess(args=args, returncode=1, stdout=b"", stderr=b"patch does not apply")
+
+    monkeypatch.setattr(edit_tool_module.subprocess, "run", fake_run)
+
+    EditAgent(tmp_path).apply(EditProposal("Change the greeting", broken, "Patch generated."))
+
+    assert (tmp_path / "README.md").read_text(encoding="utf-8") == "Hello there\n"
+
+
+def test_apply_repairs_diff_on_second_pass(tmp_path: Path, monkeypatch) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "README.md").write_text("Hello\n", encoding="utf-8")
+
+    broken = """--- a/README.md
++++ b/README.md
+@@ -2 +2 @@
+-Goodbye
++Hello there
+"""
+    repaired = """--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-Hello
++Hello there
+"""
+    monkeypatch.setattr(edit_tool_module.AIClient, "from_env", classmethod(lambda cls: RepairingAI(["NO_PATCH", repaired])))
+
+    def fake_run(args, cwd=None, input=None, capture_output=None):
+        return subprocess.CompletedProcess(args=args, returncode=1, stdout=b"", stderr=b"patch does not apply")
+
+    monkeypatch.setattr(edit_tool_module.subprocess, "run", fake_run)
+
+    EditAgent(tmp_path).apply(EditProposal("Change the greeting", broken, "Patch generated."))
+
+    assert (tmp_path / "README.md").read_text(encoding="utf-8") == "Hello there\n"
+
+
+def test_apply_reports_friendly_failure_after_repair_exhaustion(tmp_path: Path, monkeypatch) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "README.md").write_text("Hello\n", encoding="utf-8")
+
+    broken = """--- a/README.md
++++ b/README.md
+@@ -2 +2 @@
+-Goodbye
++Hello there
+"""
+    monkeypatch.setattr(edit_tool_module.AIClient, "from_env", classmethod(lambda cls: RepairingAI(["NO_PATCH", "NO_PATCH"])))
+
+    def fake_run(args, cwd=None, input=None, capture_output=None):
+        return subprocess.CompletedProcess(args=args, returncode=1, stdout=b"", stderr=b"patch does not apply")
+
+    monkeypatch.setattr(edit_tool_module.subprocess, "run", fake_run)
+
+    try:
+        EditAgent(tmp_path).apply(EditProposal("Change the greeting", broken, "Patch generated."))
+    except RuntimeError as exc:
+        assert "Repair history:" in str(exc)
+        assert "patch does not apply" in str(exc)
+    else:
+        raise AssertionError("Expected apply to fail after repair exhaustion.")
+
+    assert (tmp_path / "README.md").read_text(encoding="utf-8") == "Hello\n"

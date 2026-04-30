@@ -79,6 +79,7 @@ def test_ai_client_retries_transient_503_errors(monkeypatch) -> None:
     _clear_ai_caches()
     attempts: list[int] = []
     sleeps: list[float] = []
+    progress: list[str] = []
 
     class FakeResponse:
         text = "ok after retry"
@@ -102,9 +103,15 @@ def test_ai_client_retries_transient_503_errors(monkeypatch) -> None:
 
     client = AIClient(provider="gemini", api_key="gemini-key", api_source="GEMINI_API_KEY", available_providers=("gemini",))
 
-    assert client.complete("hello") == "ok after retry"
+    result = client.generate("hello", progress_callback=progress.append)
+
+    assert result.text == "ok after retry"
+    assert result.attempts == 3
     assert len(attempts) == 3
-    assert sleeps == [0.25, 0.75]
+    assert sleeps == [3.0, 5.0]
+    assert progress[0] == "Thinking..."
+    assert "Retrying in 3s" in progress[1]
+    assert "Retrying in 5s" in progress[2]
 
 
 def test_ai_client_returns_error_after_repeated_transient_failures(monkeypatch) -> None:
@@ -129,11 +136,15 @@ def test_ai_client_returns_error_after_repeated_transient_failures(monkeypatch) 
 
     client = AIClient(provider="gemini", api_key="gemini-key", api_source="GEMINI_API_KEY", available_providers=("gemini",))
 
-    message = client.complete("hello")
-    assert message is not None
-    assert message.startswith("AI request failed:")
-    assert len(attempts) == 3
-    assert sleeps == [0.25, 0.75]
+    result = client.generate("hello")
+
+    assert result.succeeded is False
+    assert result.error_kind == ai_module.TRANSIENT_SERVER_ERROR
+    assert "high demand" in str(result.final_error).lower()
+    assert result.attempts == 3
+    assert client.complete("hello") is None
+    assert len(attempts) == 6
+    assert sleeps == [3.0, 5.0, 3.0, 5.0]
 
 
 def test_ai_client_does_not_retry_non_transient_errors(monkeypatch) -> None:
@@ -158,11 +169,93 @@ def test_ai_client_does_not_retry_non_transient_errors(monkeypatch) -> None:
 
     client = AIClient(provider="gemini", api_key="gemini-key", api_source="GEMINI_API_KEY", available_providers=("gemini",))
 
-    message = client.complete("hello")
-    assert message is not None
-    assert message.startswith("AI request failed:")
-    assert len(attempts) == 1
+    result = client.generate("hello")
+    assert result.succeeded is False
+    assert result.error_kind == ai_module.UNKNOWN_ERROR
+    assert client.complete("hello") is None
+    assert len(attempts) == 2
     assert sleeps == []
+
+
+def test_ai_client_falls_back_from_deep_model_to_same_provider_fast_model(monkeypatch) -> None:
+    _clear_ai_caches()
+
+    class FakeAdapter:
+        def __init__(self, provider: str):
+            self.provider = provider
+            self.credentials = types.SimpleNamespace(provider=provider, api_key=f"{provider}-key")
+
+        def list_models(self, *, refresh: bool = False):
+            if self.provider == "gemini":
+                return [
+                    ai_module.DiscoveredModel("gemini", "gemini-2.5-flash", "Gemini Flash", ("generate",)),
+                    ai_module.DiscoveredModel("gemini", "gemini-2.5-pro", "Gemini Pro", ("generate",)),
+                ]
+            return []
+
+        def complete(self, prompt: str, *, model: str, system_instruction: str | None = None):
+            if model == "gemini-2.5-pro":
+                raise RuntimeError("Model is not available for your plan.")
+            return f"answered with {model}"
+
+        def embed(self, texts, *, model: str):
+            return None
+
+    monkeypatch.setattr(AIClient, "_adapter_for", lambda self, provider: FakeAdapter(provider))
+
+    client = AIClient(
+        provider="gemini",
+        api_key="gemini-key",
+        api_source="GEMINI_API_KEY",
+        fast_model="gemini-2.5-flash",
+        deep_model="gemini-2.5-pro",
+        available_providers=("gemini",),
+    )
+
+    result = client.generate("hello", deep=True)
+
+    assert result.text == "answered with gemini-2.5-flash"
+    assert result.model == "gemini-2.5-flash"
+    assert any("Falling back to `gemini-2.5-flash`" in note for note in result.fallback_notes)
+
+
+def test_ai_client_falls_back_to_next_provider_when_selected_provider_is_exhausted(monkeypatch) -> None:
+    _clear_ai_caches()
+
+    class FakeAdapter:
+        def __init__(self, provider: str):
+            self.provider = provider
+            self.credentials = types.SimpleNamespace(provider=provider, api_key=f"{provider}-key")
+
+        def list_models(self, *, refresh: bool = False):
+            if self.provider == "gemini":
+                return [ai_module.DiscoveredModel("gemini", "gemini-2.5-flash", "Gemini Flash", ("generate",))]
+            return [ai_module.DiscoveredModel("xai", "grok-3-mini", "Grok 3 Mini", ("generate",))]
+
+        def complete(self, prompt: str, *, model: str, system_instruction: str | None = None):
+            if self.provider == "gemini":
+                raise RuntimeError("429 RESOURCE_EXHAUSTED quota exhausted")
+            return "answered with xai"
+
+        def embed(self, texts, *, model: str):
+            return None
+
+    monkeypatch.setattr(AIClient, "_adapter_for", lambda self, provider: FakeAdapter(provider))
+
+    client = AIClient(
+        provider="gemini",
+        api_key="gemini-key",
+        api_source="GEMINI_API_KEY",
+        fast_model="gemini-2.5-flash",
+        deep_model="gemini-2.5-pro",
+        available_providers=("gemini", "xai"),
+    )
+
+    result = client.generate("hello")
+
+    assert result.text == "answered with xai"
+    assert result.provider == "xai"
+    assert any("Trying xAI with `grok-3-mini`" in note for note in result.fallback_notes)
 
 
 def test_ai_client_uses_saved_xai_provider_selection(tmp_path: Path, monkeypatch) -> None:

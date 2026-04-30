@@ -4,7 +4,7 @@ from contextlib import contextmanager
 import os
 import time
 from dataclasses import dataclass
-from typing import Iterable, Iterator, Protocol
+from typing import Callable, Iterable, Iterator, Protocol
 from urllib import error, request
 import json
 
@@ -14,11 +14,17 @@ GENERATION_CAPABILITY = "generate"
 EMBED_CAPABILITY = "embed"
 PROVIDER_ORDER = ("gemini", "xai")
 PROVIDER_LABELS = {"gemini": "Gemini", "xai": "xAI"}
-TRANSIENT_BACKOFF_SECONDS = (0.25, 0.75)
+TRANSIENT_BACKOFF_SECONDS = (3.0, 5.0)
 GEMINI_DEFAULT_FAST_MODEL = "gemini-2.5-flash"
 GEMINI_DEFAULT_DEEP_MODEL = "gemini-2.5-pro"
 GEMINI_DEFAULT_EMBEDDING_MODEL = "gemini-embedding-001"
 XAI_DEFAULT_FAST_MODEL = "grok-3-mini"
+TRANSIENT_SERVER_ERROR = "transient_server"
+QUOTA_EXHAUSTED_ERROR = "quota_exhausted"
+MODEL_UNAVAILABLE_ERROR = "model_unavailable"
+PROVIDER_UNAVAILABLE_ERROR = "provider_unavailable"
+AUTH_OR_PERMISSION_ERROR = "auth_or_permission"
+UNKNOWN_ERROR = "unknown"
 
 _CLIENT_CACHE: dict[tuple[str, str, str | None], object] = {}
 _MODEL_CACHE: dict[tuple[str, str], tuple["DiscoveredModel", ...]] = {}
@@ -91,6 +97,25 @@ class ResolvedAIProfile:
     warnings: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class GenerationResult:
+    text: str | None
+    provider: str | None
+    model: str | None
+    used_deep_mode: bool
+    attempts: int
+    fallback_notes: tuple[str, ...] = ()
+    error_kind: str | None = None
+    final_error: str | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        return bool(self.text)
+
+
+GenerationProgressCallback = Callable[[str], None]
+
+
 class ProviderAdapter(Protocol):
     provider: str
     credentials: ProviderCredentials
@@ -149,20 +174,117 @@ class AIClient:
         return self.fast_model
 
     def complete(self, prompt: str, *, deep: bool = False, system_instruction: str | None = None) -> str | None:
+        return self.generate(
+            prompt,
+            deep=deep,
+            system_instruction=system_instruction,
+        ).text
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        deep: bool = False,
+        system_instruction: str | None = None,
+        progress_callback: GenerationProgressCallback | None = None,
+    ) -> GenerationResult:
         if not self.available or not self.provider:
-            return None
-        model = self._resolved_generation_model(deep=deep)
-        if not model:
-            return f"AI request failed: no generation model is configured for {self.provider_label}."
-        attempts = len(TRANSIENT_BACKOFF_SECONDS) + 1
-        for attempt in range(attempts):
-            try:
-                return self._adapter_for(self.provider).complete(prompt, model=model, system_instruction=system_instruction)
-            except Exception as exc:
-                if not is_transient_ai_error(exc) or attempt >= attempts - 1:
-                    return f"AI request failed: {exc}"
-                time.sleep(TRANSIENT_BACKOFF_SECONDS[attempt])
-        return None
+            return GenerationResult(
+                text=None,
+                provider=None,
+                model=None,
+                used_deep_mode=deep,
+                attempts=0,
+                error_kind=PROVIDER_UNAVAILABLE_ERROR,
+                final_error="No AI provider is configured.",
+            )
+
+        emit_generation_progress(progress_callback, "Thinking...")
+        candidates = self._generation_candidates(deep=deep)
+        if not candidates:
+            return GenerationResult(
+                text=None,
+                provider=self.provider,
+                model=None,
+                used_deep_mode=deep,
+                attempts=0,
+                error_kind=MODEL_UNAVAILABLE_ERROR,
+                final_error=f"No generation model is configured for {self.provider_label}.",
+            )
+
+        attempts = 0
+        fallback_notes: list[str] = []
+        previous_failure_kind: str | None = None
+        previous_provider: str | None = None
+        previous_model: str | None = None
+        last_error_kind: str | None = None
+        last_error: str | None = None
+
+        for index, (provider, model, candidate_deep) in enumerate(candidates):
+            if index:
+                note = describe_generation_fallback(
+                    from_provider=previous_provider,
+                    from_model=previous_model,
+                    to_provider=provider,
+                    to_model=model,
+                    error_kind=previous_failure_kind,
+                )
+                if note:
+                    fallback_notes.append(note)
+                    emit_generation_progress(progress_callback, note)
+
+            for retry_index in range(len(TRANSIENT_BACKOFF_SECONDS) + 1):
+                if retry_index:
+                    delay = TRANSIENT_BACKOFF_SECONDS[retry_index - 1]
+                    retry_note = f"{provider_label(provider)} is busy. Retrying in {int(delay)}s..."
+                    emit_generation_progress(progress_callback, retry_note)
+                    time.sleep(delay)
+                attempts += 1
+                try:
+                    text = self._adapter_for(provider).complete(
+                        prompt,
+                        model=model,
+                        system_instruction=system_instruction,
+                    )
+                except Exception as exc:
+                    error_kind = classify_generation_error(exc)
+                    error_message = humanize_provider_error(provider, exc)
+                    last_error_kind = error_kind
+                    last_error = error_message
+                    previous_failure_kind = error_kind
+                    previous_provider = provider
+                    previous_model = model
+                    if error_kind == TRANSIENT_SERVER_ERROR and retry_index < len(TRANSIENT_BACKOFF_SECONDS):
+                        continue
+                    break
+
+                if text:
+                    return GenerationResult(
+                        text=text,
+                        provider=provider,
+                        model=model,
+                        used_deep_mode=candidate_deep,
+                        attempts=attempts,
+                        fallback_notes=tuple(unique_preserving_order(fallback_notes)),
+                    )
+
+                last_error_kind = UNKNOWN_ERROR
+                last_error = f"{provider_label(provider)} returned an empty response."
+                previous_failure_kind = UNKNOWN_ERROR
+                previous_provider = provider
+                previous_model = model
+                break
+
+        return GenerationResult(
+            text=None,
+            provider=previous_provider or self.provider,
+            model=previous_model,
+            used_deep_mode=deep,
+            attempts=attempts,
+            fallback_notes=tuple(unique_preserving_order(fallback_notes)),
+            error_kind=last_error_kind or UNKNOWN_ERROR,
+            final_error=last_error or f"{self.provider_label} could not generate a response right now.",
+        )
 
     def embed(self, texts: Iterable[str]) -> list[list[float]] | None:
         if not self.available or not self.provider or not self.embedding_model:
@@ -300,6 +422,33 @@ class AIClient:
             return selected
         return self._fallback_model_for(self.provider, GENERATION_CAPABILITY, deep=deep)
 
+    def _generation_candidates(self, *, deep: bool) -> list[tuple[str, str, bool]]:
+        if not self.provider:
+            return []
+        candidates: list[tuple[str, str, bool]] = []
+        selected_model = self._resolved_generation_model(deep=deep)
+        if selected_model:
+            candidates.append((self.provider, selected_model, deep))
+        fast_model = self._resolved_generation_model(deep=False)
+        if deep and fast_model and fast_model != selected_model:
+            candidates.append((self.provider, fast_model, False))
+        for provider in self.available_providers:
+            if provider == self.provider:
+                continue
+            other_model = resolved_generation_model_for_provider(provider, deep=False)
+            if other_model:
+                candidates.append((provider, other_model, False))
+
+        unique: list[tuple[str, str, bool]] = []
+        seen: set[tuple[str, str]] = set()
+        for provider, model, candidate_deep in candidates:
+            key = (provider, model)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append((provider, model, candidate_deep))
+        return unique
+
     def _resolved_embedding_model(self) -> str | None:
         if not self.provider or not self.supports_embeddings(self.provider):
             return None
@@ -313,7 +462,10 @@ class AIClient:
         return self._fallback_model_for(self.provider, EMBED_CAPABILITY, deep=False)
 
     def _fallback_model_for(self, provider: str, capability: str, *, deep: bool) -> str | None:
-        discovered = self.list_models(provider=provider, capability=capability)
+        try:
+            discovered = self.list_models(provider=provider, capability=capability)
+        except Exception:
+            discovered = []
         if discovered:
             chosen = choose_default_discovered_model(provider, discovered, capability=capability, deep=deep)
             if chosen:
@@ -443,6 +595,15 @@ def provider_env_model(provider: str, kind: str) -> str | None:
     return None
 
 
+def resolved_generation_model_for_provider(provider: str, *, deep: bool) -> str | None:
+    config = ConfigManager.load().ai_settings.providers.get(provider, ProviderModelConfig())
+    return first_non_empty(
+        config.deep_model if deep else config.model,
+        provider_env_model(provider, "deep_model" if deep else "model"),
+        default_model_for_provider(provider, capability=GENERATION_CAPABILITY, deep=deep),
+    )
+
+
 def default_model_for_provider(provider: str, *, capability: str, deep: bool) -> str | None:
     if provider == "gemini":
         if capability == EMBED_CAPABILITY:
@@ -486,10 +647,133 @@ def first_non_empty(*values: str | None) -> str | None:
     return None
 
 
+def provider_label(provider: str | None) -> str:
+    if not provider:
+        return "AI"
+    return PROVIDER_LABELS.get(provider, provider)
+
+
+def emit_generation_progress(
+    callback: GenerationProgressCallback | None,
+    message: str,
+) -> None:
+    if not callback:
+        return
+    callback(message)
+
+
+def classify_generation_error(exc: Exception) -> str:
+    message = clean_error_text(str(exc)).casefold()
+    if not message:
+        return UNKNOWN_ERROR
+
+    transient_markers = (
+        "503",
+        "unavailable",
+        "high demand",
+        "spikes in demand",
+        "temporarily unavailable",
+        "temporary",
+        "timed out",
+        "timeout",
+        "deadline exceeded",
+        "connection reset",
+        "network error",
+        "service unavailable",
+    )
+    if any(marker in message for marker in transient_markers):
+        return TRANSIENT_SERVER_ERROR
+
+    quota_markers = (
+        "429",
+        "resource_exhausted",
+        "quota",
+        "rate limit",
+        "rate-limit",
+        "billing",
+        "credits",
+        "licenses yet",
+        "token limit",
+        "exhausted",
+        "too many requests",
+    )
+    if any(marker in message for marker in quota_markers):
+        return QUOTA_EXHAUSTED_ERROR
+
+    model_markers = (
+        "model not found",
+        "unknown model",
+        "unsupported model",
+        "not available for your plan",
+        "does not have access to model",
+        "model is not available",
+        "not found",
+    )
+    if any(marker in message for marker in model_markers):
+        return MODEL_UNAVAILABLE_ERROR
+
+    auth_markers = (
+        "401",
+        "403",
+        "unauthorized",
+        "forbidden",
+        "permission",
+        "api key",
+        "authentication",
+        "access denied",
+    )
+    if any(marker in message for marker in auth_markers):
+        return AUTH_OR_PERMISSION_ERROR
+
+    provider_markers = (
+        "dns",
+        "connection refused",
+        "name or service not known",
+        "host not found",
+        "no api key",
+        "not currently configured",
+        "provider request failed",
+    )
+    if any(marker in message for marker in provider_markers):
+        return PROVIDER_UNAVAILABLE_ERROR
+
+    return UNKNOWN_ERROR
+
+
+def describe_generation_fallback(
+    *,
+    from_provider: str | None,
+    from_model: str | None,
+    to_provider: str,
+    to_model: str,
+    error_kind: str | None,
+) -> str | None:
+    if not from_provider or not from_model:
+        return None
+
+    if from_provider == to_provider and from_model == to_model:
+        return None
+
+    if error_kind == TRANSIENT_SERVER_ERROR:
+        reason = f"{provider_label(from_provider)} stayed busy."
+    elif error_kind == QUOTA_EXHAUSTED_ERROR:
+        reason = f"{provider_label(from_provider)} is exhausted."
+    elif error_kind == MODEL_UNAVAILABLE_ERROR:
+        reason = f"{provider_label(from_provider)} could not use `{from_model}`."
+    elif error_kind == AUTH_OR_PERMISSION_ERROR:
+        reason = f"{provider_label(from_provider)} could not use the current credentials."
+    elif error_kind == PROVIDER_UNAVAILABLE_ERROR:
+        reason = f"{provider_label(from_provider)} is unavailable."
+    else:
+        reason = f"{provider_label(from_provider)} could not finish the request."
+
+    if from_provider == to_provider:
+        return f"{reason} Falling back to `{to_model}`..."
+    return f"{reason} Trying {provider_label(to_provider)} with `{to_model}`..."
+
+
 def is_transient_ai_error(exc: Exception) -> bool:
-    message = str(exc).upper()
-    transient_markers = ("503", "UNAVAILABLE", "HIGH DEMAND", "SPIKES IN DEMAND", "TEMPORARY", "TIMED OUT")
-    return any(marker in message for marker in transient_markers)
+    return classify_generation_error(exc) == TRANSIENT_SERVER_ERROR
 
 
 @contextmanager

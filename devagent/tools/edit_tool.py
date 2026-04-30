@@ -7,7 +7,7 @@ from pathlib import Path
 
 from devagent.context.indexer import CodeIndexer
 from devagent.context.retriever import Retriever
-from devagent.tools.ai import AIClient
+from devagent.tools.ai import AIClient, GenerationProgressCallback
 
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$")
 PATCH_START_MARKERS = ("diff --git ", "--- a/", "--- /", "Index: ")
@@ -62,7 +62,12 @@ class EditAgent:
         self.workspace = workspace.expanduser().resolve()
         self.ai = AIClient.from_env()
 
-    def propose(self, instruction: str) -> EditProposal:
+    def propose(
+        self,
+        instruction: str,
+        *,
+        progress_callback: GenerationProgressCallback | None = None,
+    ) -> EditProposal:
         index = CodeIndexer(self.workspace).load_or_build()
         chunks = Retriever(index).search(instruction, limit=8)
         context = "\n\n".join(
@@ -86,19 +91,60 @@ class EditAgent:
             "If the context is insufficient, output exactly: NO_PATCH\n\n"
             f"Instruction: {instruction}\n\nContext:\n{context}"
         )
-        diff = self.ai.complete(prompt)
-        if not diff or diff.strip() == "NO_PATCH" or "AI request failed:" in diff:
-            return EditProposal(instruction=instruction, diff=None, message=diff or "No patch generated.")
+        result = self.ai.generate(prompt, progress_callback=progress_callback)
+        diff = result.text
+        if not diff or diff.strip() == "NO_PATCH":
+            reason = result.final_error or "No patch generated."
+            if result.fallback_notes:
+                reason = f"{reason}\n\nRecovery notes:\n- " + "\n- ".join(result.fallback_notes)
+            return EditProposal(instruction=instruction, diff=None, message=reason)
         clean_diff = sanitize_unified_diff(diff)
         if not clean_diff:
             return EditProposal(instruction=instruction, diff=None, message="No valid unified diff was generated.")
         return EditProposal(instruction=instruction, diff=clean_diff, message="Patch generated.")
 
-    def apply(self, proposal: EditProposal) -> None:
+    def apply(
+        self,
+        proposal: EditProposal,
+        *,
+        progress_callback: GenerationProgressCallback | None = None,
+    ) -> None:
         if not proposal.diff:
             raise ValueError("No diff is available to apply.")
 
-        diff_bytes = proposal.diff.encode("utf-8")
+        current_diff = proposal.diff
+        failure_messages: list[str] = []
+
+        for repair_pass in range(3):
+            try:
+                self._apply_once(current_diff)
+                return
+            except RuntimeError as exc:
+                failure_messages.append(str(exc))
+                if repair_pass >= 2 or not self.ai.available:
+                    break
+
+                if progress_callback:
+                    progress_callback(f"Patch apply failed. Repairing diff (pass {repair_pass + 1}/2)...")
+
+                repaired = self._repair_diff(
+                    proposal=proposal,
+                    broken_diff=current_diff,
+                    apply_error=str(exc),
+                    progress_callback=progress_callback,
+                )
+                if not repaired:
+                    continue
+                current_diff = repaired
+
+        summary = failure_messages[-1] if failure_messages else "Patch apply failed."
+        if len(failure_messages) > 1:
+            history = "\n\n".join(f"Attempt {index + 1}:\n{message}" for index, message in enumerate(failure_messages))
+            raise RuntimeError(f"{summary}\n\nRepair history:\n{history}")
+        raise RuntimeError(summary)
+
+    def _apply_once(self, diff: str) -> None:
+        diff_bytes = diff.encode("utf-8")
         check_result = self._run_git_apply(["--check"], diff_bytes)
         apply_result = self._run_git_apply(["--recount", "--whitespace=fix"], diff_bytes)
         if apply_result.returncode == 0:
@@ -109,7 +155,7 @@ class EditAgent:
             format_git_apply_error("git apply --recount --whitespace=fix", apply_result),
         ]
         try:
-            apply_unified_diff_fallback(proposal.diff, self.workspace)
+            apply_unified_diff_fallback(diff, self.workspace)
             return
         except PatchApplyError as exc:
             detail = "\n".join(error for error in git_errors if error)
@@ -124,6 +170,29 @@ class EditAgent:
             input=diff_bytes,
             capture_output=True,
         )
+
+    def _repair_diff(
+        self,
+        *,
+        proposal: EditProposal,
+        broken_diff: str,
+        apply_error: str,
+        progress_callback: GenerationProgressCallback | None = None,
+    ) -> str | None:
+        prompt = (
+            "You are repairing a unified diff that failed to apply. "
+            "Return only a valid unified diff. Do not use Markdown fences. "
+            "Keep the scope minimal and preserve the original user intent. "
+            "Use the apply error details to fix line numbers, context, or malformed hunk structure. "
+            "If you cannot repair it safely, output exactly: NO_PATCH\n\n"
+            f"Original instruction:\n{proposal.instruction}\n\n"
+            f"Broken diff:\n{broken_diff}\n\n"
+            f"Apply error details:\n{apply_error}"
+        )
+        result = self.ai.generate(prompt, progress_callback=progress_callback)
+        if not result.text or result.text.strip() == "NO_PATCH":
+            return None
+        return sanitize_unified_diff(result.text)
 
 
 def sanitize_unified_diff(raw: str) -> str | None:

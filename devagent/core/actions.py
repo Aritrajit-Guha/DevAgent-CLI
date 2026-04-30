@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from devagent.config.settings import AISettings, ConfigManager, ProviderModelConfig
 from devagent.context.indexer import CodeIndexer
@@ -148,8 +148,20 @@ class DevAgentActions:
         index = CodeIndexer(self.workspace).build()
         return len(index.records)
 
-    def chat(self, question: str, *, deep: bool = False, new_session: bool = False) -> str:
-        return self.repo_agent.answer(question, deep=deep, new_session=new_session)
+    def chat(
+        self,
+        question: str,
+        *,
+        deep: bool = False,
+        new_session: bool = False,
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> str:
+        return self.repo_agent.answer(
+            question,
+            deep=deep,
+            new_session=new_session,
+            progress_callback=progress_callback,
+        )
 
     def clear_chat_session(self) -> None:
         self.repo_agent.clear_session()
@@ -249,11 +261,21 @@ class DevAgentActions:
         self.refresh_workspace(result.path)
         return result
 
-    def edit_propose(self, instruction: str) -> EditProposal:
-        return EditAgent(self.workspace).propose(instruction)
+    def edit_propose(
+        self,
+        instruction: str,
+        *,
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> EditProposal:
+        return EditAgent(self.workspace).propose(instruction, progress_callback=progress_callback)
 
-    def edit_apply(self, proposal: EditProposal) -> None:
-        EditAgent(self.workspace).apply(proposal)
+    def edit_apply(
+        self,
+        proposal: EditProposal,
+        *,
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> None:
+        EditAgent(self.workspace).apply(proposal, progress_callback=progress_callback)
 
     def git_status(self) -> str:
         return self.git_tool.status_text()

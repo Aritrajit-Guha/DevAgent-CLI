@@ -8,7 +8,7 @@ from devagent.core.actions import AISelectionResult, PullOutcome, PullRequestPre
 from devagent.core.agent import RepoAgent
 from devagent.core.project import ProjectInfo
 from devagent.core.shell import AgentShell, GitIntent, home_menu_choices, interactive_terminal
-from devagent.tools.ai import AIProviderStatus, AIStatusSnapshot, DiscoveredModel, ProviderModelListing
+from devagent.tools.ai import AIProviderStatus, AIStatusSnapshot, DiscoveredModel, GenerationResult, ProviderModelListing
 from devagent.tools.git_tool import GitRemote
 from devagent.tools.runtime_tool import LaunchSpec
 from devagent.tools.setup_tool import SetupResult
@@ -19,9 +19,42 @@ class FakeAI:
         self.available = True
         self.calls: list[dict[str, object]] = []
 
-    def complete(self, prompt: str, *, deep: bool = False, system_instruction: str | None = None) -> str:
+    def generate(self, prompt: str, *, deep: bool = False, system_instruction: str | None = None, progress_callback=None) -> GenerationResult:
         self.calls.append({"prompt": prompt, "deep": deep, "system_instruction": system_instruction})
-        return "Detailed repo answer"
+        return GenerationResult(
+            text="Detailed repo answer",
+            provider="gemini",
+            model="gemini-2.5-flash",
+            used_deep_mode=deep,
+            attempts=1,
+        )
+
+    def complete(self, prompt: str, *, deep: bool = False, system_instruction: str | None = None) -> str:
+        generated = self.generate(prompt, deep=deep, system_instruction=system_instruction)
+        return generated.text or ""
+
+    def embed(self, texts):
+        return None
+
+
+class FailingAI:
+    def __init__(self):
+        self.available = True
+        self.provider_label = "Gemini"
+
+    def generate(self, prompt: str, *, deep: bool = False, system_instruction: str | None = None, progress_callback=None) -> GenerationResult:
+        return GenerationResult(
+            text=None,
+            provider="gemini",
+            model="gemini-2.5-pro" if deep else "gemini-2.5-flash",
+            used_deep_mode=deep,
+            attempts=3,
+            error_kind="transient_server",
+            final_error="Gemini stayed busy after retries.",
+        )
+
+    def complete(self, prompt: str, *, deep: bool = False, system_instruction: str | None = None) -> str | None:
+        return None
 
     def embed(self, texts):
         return None
@@ -32,7 +65,7 @@ class FakeRepoAgent:
         self.deep_calls: list[bool] = []
         self.cleared = False
 
-    def answer(self, question: str, *, deep: bool = False, new_session: bool = False) -> str:
+    def answer(self, question: str, *, deep: bool = False, new_session: bool = False, progress_callback=None) -> str:
         self.deep_calls.append(deep)
         return f"chat:{question}"
 
@@ -70,6 +103,25 @@ def test_repo_agent_uses_session_memory_and_deep_mode(tmp_path: Path, monkeypatc
     assert "Where is authentication implemented?" not in str(fake_ai.calls[2]["prompt"])
     assert "backend/auth.py" in str(fake_ai.calls[1]["prompt"])
     assert "backend/routes.py" in str(fake_ai.calls[1]["prompt"])
+
+
+def test_repo_agent_returns_grounded_fallback_when_generation_fails(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "backend").mkdir()
+    (workspace / "backend" / "auth.py").write_text(
+        "def login_user(user):\n    return create_session(user)\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("devagent.tools.ai.AIClient.from_env", classmethod(lambda cls: FailingAI()))
+
+    agent = RepoAgent(workspace)
+    answer = agent.answer("Where is authentication implemented?", deep=True)
+
+    assert "could not finish the AI synthesis" in answer
+    assert "backend/auth.py" in answer
+    assert "Gemini stayed busy after retries." in answer
 
 
 def test_shell_routes_saved_phrase_runtime_and_chat(tmp_path: Path, monkeypatch) -> None:
@@ -214,6 +266,56 @@ def test_chat_mode_preserves_phrase_match_and_menu_command(tmp_path: Path) -> No
     assert launches == ["Start the site"]
     assert menu_result is not None
     assert menu_result.return_to_menu is True
+
+
+def test_edit_mode_stays_active_after_failed_proposal(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    shell = AgentShell(workspace)
+    calls: list[str] = []
+
+    def fake_propose(instruction: str, *, progress_callback=None):
+        calls.append(instruction)
+        if progress_callback:
+            progress_callback("Thinking...")
+        return type("Proposal", (), {"diff": None, "message": "Still busy. Please try again."})()
+
+    shell.actions.edit_propose = fake_propose
+    prompts = iter(["first attempt", ""])
+    monkeypatch.setattr("devagent.core.shell.Prompt.ask", lambda *args, **kwargs: next(prompts))
+
+    shell.edit_mode()
+
+    assert calls == ["first attempt"]
+
+
+def test_edit_mode_stays_active_after_apply_failure(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    shell = AgentShell(workspace)
+    proposal = type("Proposal", (), {"diff": "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-Hello\n+Hi\n", "message": "Patch generated."})()
+    propose_calls: list[str] = []
+    apply_calls: list[str] = []
+
+    def fake_propose(instruction: str, *, progress_callback=None):
+        propose_calls.append(instruction)
+        return proposal
+
+    def fake_apply(current_proposal, *, progress_callback=None):
+        apply_calls.append(current_proposal.message)
+        raise RuntimeError("Patch repair exhausted.")
+
+    shell.actions.edit_propose = fake_propose
+    shell.actions.edit_apply = fake_apply
+    prompts = iter(["first attempt", ""])
+    monkeypatch.setattr("devagent.core.shell.Prompt.ask", lambda *args, **kwargs: next(prompts))
+    confirms = iter([True])
+    monkeypatch.setattr("devagent.core.shell.Confirm.ask", lambda *args, **kwargs: next(confirms))
+
+    shell.edit_mode()
+
+    assert propose_calls == ["first attempt"]
+    assert apply_calls == ["Patch generated."]
 
 
 def test_home_menu_choices_cover_all_modes() -> None:
