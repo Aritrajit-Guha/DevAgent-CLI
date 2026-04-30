@@ -367,6 +367,7 @@ def test_ai_help_catalog_is_richer(monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert "Discover configured AI providers" in result.stdout
+    assert "Groq" in result.stdout
     assert "save defaults" in result.stdout
 
 
@@ -508,6 +509,39 @@ def test_ai_use_provider_only_saves_when_discovery_is_unavailable(monkeypatch) -
     assert calls == ["xai"]
     assert "AI Selection Saved" in result.stdout
     assert "grok-3-mini" in result.stdout
+
+
+def test_ai_use_rejects_embedding_model_for_groq(monkeypatch) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr("devagent.cli.main.interactive_terminal", lambda: False)
+
+    class FakeActions:
+        def ai_status(self, refresh=False):
+            return AIStatusSnapshot(
+                selected_provider="groq",
+                fast_model="llama-3.1-8b-instant",
+                deep_model="llama-3.1-8b-instant",
+                embedding_model=None,
+                providers=(
+                    AIProviderStatus("groq", "GROQ_API_KEY", True, generation_models=2, embedding_models=0),
+                ),
+            )
+
+        def ai_models(self, provider=None, refresh=False):
+            return [
+                ProviderModelListing(
+                    provider="groq",
+                    models=(
+                        DiscoveredModel("groq", "llama-3.1-8b-instant", "Llama 3.1 8B Instant", ("generate",)),
+                    ),
+                ),
+            ]
+
+    monkeypatch.setattr("devagent.cli.main._ai_actions", lambda: FakeActions())
+
+    result = runner.invoke(app, ["ai", "use", "--provider", "groq", "--embedding-model", "ghost-embed"])
+
+    assert result.exit_code == 2
 
 
 def test_git_pull_help_shows_explicit_remote_and_branch_flags(monkeypatch) -> None:

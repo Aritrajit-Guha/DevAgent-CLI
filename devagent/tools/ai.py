@@ -12,12 +12,14 @@ from devagent.config.settings import ConfigManager, ProviderModelConfig
 
 GENERATION_CAPABILITY = "generate"
 EMBED_CAPABILITY = "embed"
-PROVIDER_ORDER = ("gemini", "xai")
-PROVIDER_LABELS = {"gemini": "Gemini", "xai": "xAI"}
+PROVIDER_ORDER = ("gemini", "groq", "xai")
+PROVIDER_LABELS = {"gemini": "Gemini", "groq": "Groq", "xai": "xAI"}
 TRANSIENT_BACKOFF_SECONDS = (3.0, 5.0)
 GEMINI_DEFAULT_FAST_MODEL = "gemini-2.5-flash"
 GEMINI_DEFAULT_DEEP_MODEL = "gemini-2.5-pro"
 GEMINI_DEFAULT_EMBEDDING_MODEL = "gemini-embedding-001"
+GROQ_DEFAULT_FAST_MODEL = "llama-3.1-8b-instant"
+GROQ_DEFAULT_DEEP_MODEL = "llama-3.1-8b-instant"
 XAI_DEFAULT_FAST_MODEL = "grok-3-mini"
 TRANSIENT_SERVER_ERROR = "transient_server"
 QUOTA_EXHAUSTED_ERROR = "quota_exhausted"
@@ -474,6 +476,8 @@ class AIClient:
             if capability == EMBED_CAPABILITY:
                 return GEMINI_DEFAULT_EMBEDDING_MODEL
             return GEMINI_DEFAULT_DEEP_MODEL if deep else GEMINI_DEFAULT_FAST_MODEL
+        if provider == "groq" and capability == GENERATION_CAPABILITY:
+            return GROQ_DEFAULT_DEEP_MODEL if deep else GROQ_DEFAULT_FAST_MODEL
         if provider == "xai" and capability == GENERATION_CAPABILITY:
             return XAI_DEFAULT_FAST_MODEL
         return None
@@ -489,6 +493,8 @@ class AIClient:
             raise RuntimeError(f"No API key is configured for provider `{provider}`.")
         if provider == "gemini":
             return GeminiAdapter(credentials)
+        if provider == "groq":
+            return GroqAdapter(credentials)
         if provider == "xai":
             return XAIAdapter(credentials)
         raise RuntimeError(f"Unsupported AI provider `{provider}`.")
@@ -559,6 +565,10 @@ def resolve_available_credentials() -> dict[str, ProviderCredentials]:
         if google_key:
             credentials["gemini"] = ProviderCredentials("gemini", google_key, "GOOGLE_API_KEY")
 
+    groq_key = os.environ.get("GROQ_API_KEY")
+    if groq_key:
+        credentials["groq"] = ProviderCredentials("groq", groq_key, "GROQ_API_KEY")
+
     xai_key = os.environ.get("XAI_API_KEY")
     if xai_key:
         credentials["xai"] = ProviderCredentials("xai", xai_key, "XAI_API_KEY")
@@ -609,6 +619,8 @@ def default_model_for_provider(provider: str, *, capability: str, deep: bool) ->
         if capability == EMBED_CAPABILITY:
             return GEMINI_DEFAULT_EMBEDDING_MODEL
         return GEMINI_DEFAULT_DEEP_MODEL if deep else GEMINI_DEFAULT_FAST_MODEL
+    if provider == "groq" and capability == GENERATION_CAPABILITY:
+        return GROQ_DEFAULT_DEEP_MODEL if deep else GROQ_DEFAULT_FAST_MODEL
     if provider == "xai" and capability == GENERATION_CAPABILITY:
         return XAI_DEFAULT_FAST_MODEL
     return None
@@ -633,6 +645,12 @@ def choose_default_discovered_model(
             preferences = ("2.5-pro", "pro")
         else:
             preferences = ("2.5-flash", "flash")
+        for needle in preferences:
+            for model in ranked:
+                if needle in model.id.casefold():
+                    return model
+    if provider == "groq" and capability == GENERATION_CAPABILITY:
+        preferences = ("llama-3.3-70b-versatile", "70b-versatile", "70b") if deep else ("llama-3.1-8b-instant", "8b-instant", "instant")
         for needle in preferences:
             for model in ranked:
                 if needle in model.id.casefold():
@@ -780,6 +798,7 @@ def is_transient_ai_error(exc: Exception) -> bool:
 def selected_api_environment(api_key: str | None, api_source: str | None) -> Iterator[None]:
     original_gemini = os.environ.get("GEMINI_API_KEY")
     original_google = os.environ.get("GOOGLE_API_KEY")
+    original_groq = os.environ.get("GROQ_API_KEY")
     original_xai = os.environ.get("XAI_API_KEY")
     try:
         if api_source == "GEMINI_API_KEY" and api_key:
@@ -788,12 +807,15 @@ def selected_api_environment(api_key: str | None, api_source: str | None) -> Ite
         elif api_source == "GOOGLE_API_KEY" and api_key:
             os.environ["GOOGLE_API_KEY"] = api_key
             os.environ.pop("GEMINI_API_KEY", None)
+        elif api_source == "GROQ_API_KEY" and api_key:
+            os.environ["GROQ_API_KEY"] = api_key
         elif api_source == "XAI_API_KEY" and api_key:
             os.environ["XAI_API_KEY"] = api_key
         yield
     finally:
         restore_environment_value("GEMINI_API_KEY", original_gemini)
         restore_environment_value("GOOGLE_API_KEY", original_google)
+        restore_environment_value("GROQ_API_KEY", original_groq)
         restore_environment_value("XAI_API_KEY", original_xai)
 
 
@@ -937,6 +959,28 @@ class XAIAdapter:
         return client
 
 
+class GroqAdapter(XAIAdapter):
+    provider = "groq"
+    base_url = "https://api.groq.com/openai/v1"
+
+    def list_models(self, *, refresh: bool = False) -> list[DiscoveredModel]:
+        cache_key = (self.provider, self.credentials.api_key)
+        if refresh:
+            _MODEL_CACHE.pop(cache_key, None)
+        cached = _MODEL_CACHE.get(cache_key)
+        if cached is not None:
+            return list(cached)
+
+        payload = fetch_json(
+            f"{self.base_url}/models",
+            headers={"Authorization": f"Bearer {self.credentials.api_key}"},
+        )
+        models = [normalize_groq_model(item) for item in extract_model_items(payload)]
+        filtered = [model for model in models if model.capabilities]
+        _MODEL_CACHE[cache_key] = tuple(filtered)
+        return filtered
+
+
 def normalize_gemini_model(raw) -> DiscoveredModel:
     name = extract_attr(raw, "name") or extract_attr(raw, "model") or ""
     model_id = strip_model_prefix(name) or str(name)
@@ -989,6 +1033,56 @@ def normalize_xai_model(raw) -> DiscoveredModel:
         modalities=tuple(modalities),
         aliases=tuple(unique_preserving_order([model_id, *aliases])),
     )
+
+
+def normalize_groq_model(raw) -> DiscoveredModel:
+    name = extract_attr(raw, "id") or extract_attr(raw, "name") or ""
+    model_id = str(name)
+    label = (
+        extract_attr(raw, "display_name")
+        or extract_attr(raw, "displayName")
+        or extract_attr(raw, "name")
+        or model_id
+    )
+    aliases = normalize_string_values(extract_attr(raw, "aliases") or [])
+    modalities = normalize_string_values(
+        extract_attr(raw, "modalities")
+        or extract_attr(raw, "input_modalities")
+        or extract_attr(raw, "inputModalities")
+        or []
+    )
+    active = extract_attr(raw, "active")
+    capabilities: tuple[str, ...] = ()
+    if active is not False and is_groq_generation_model(model_id, modalities=modalities):
+        capabilities = (GENERATION_CAPABILITY,)
+    return DiscoveredModel(
+        provider="groq",
+        id=model_id,
+        label=str(label),
+        capabilities=capabilities,
+        modalities=tuple(modalities),
+        aliases=tuple(unique_preserving_order([model_id, *aliases])),
+    )
+
+
+def is_groq_generation_model(model_id: str, *, modalities: Iterable[str] = ()) -> bool:
+    identifier = model_id.casefold()
+    modality_values = tuple(value.casefold() for value in modalities)
+    blocked_markers = (
+        "whisper",
+        "prompt-guard",
+        "safeguard",
+        "speech",
+        "transcribe",
+        "transcription",
+        "audio",
+        "tts",
+    )
+    if any(marker in identifier for marker in blocked_markers):
+        return False
+    if any(any(marker in modality for marker in blocked_markers) for modality in modality_values):
+        return False
+    return True
 
 
 def extract_model_items(payload) -> list[object]:

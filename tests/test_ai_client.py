@@ -13,15 +13,17 @@ def _clear_ai_caches() -> None:
     ai_module._MODEL_CACHE.clear()
 
 
-def test_resolve_api_credentials_prefers_gemini_over_google_and_xai(monkeypatch) -> None:
+def test_resolve_api_credentials_prefers_gemini_over_google_groq_and_xai(monkeypatch) -> None:
     monkeypatch.setenv("GOOGLE_API_KEY", "google-key")
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-key")
     monkeypatch.setenv("XAI_API_KEY", "xai-key")
 
     api_key, source = resolve_api_credentials()
 
     assert api_key == "gemini-key"
     assert source == "GEMINI_API_KEY"
+    assert resolve_api_credentials("groq") == ("groq-key", "GROQ_API_KEY")
     assert resolve_api_credentials("xai") == ("xai-key", "XAI_API_KEY")
 
 
@@ -258,6 +260,49 @@ def test_ai_client_falls_back_to_next_provider_when_selected_provider_is_exhaust
     assert any("Trying xAI with `grok-3-mini`" in note for note in result.fallback_notes)
 
 
+def test_ai_client_prefers_groq_before_xai_during_cross_provider_failover(monkeypatch) -> None:
+    _clear_ai_caches()
+
+    class FakeAdapter:
+        def __init__(self, provider: str):
+            self.provider = provider
+            self.credentials = types.SimpleNamespace(provider=provider, api_key=f"{provider}-key")
+
+        def list_models(self, *, refresh: bool = False):
+            if self.provider == "gemini":
+                return [ai_module.DiscoveredModel("gemini", "gemini-2.5-flash", "Gemini Flash", ("generate",))]
+            if self.provider == "groq":
+                return [ai_module.DiscoveredModel("groq", "llama-3.1-8b-instant", "Llama 3.1 8B Instant", ("generate",))]
+            return [ai_module.DiscoveredModel("xai", "grok-3-mini", "Grok 3 Mini", ("generate",))]
+
+        def complete(self, prompt: str, *, model: str, system_instruction: str | None = None):
+            if self.provider == "gemini":
+                raise RuntimeError("429 RESOURCE_EXHAUSTED quota exhausted")
+            if self.provider == "groq":
+                return "answered with groq"
+            return "answered with xai"
+
+        def embed(self, texts, *, model: str):
+            return None
+
+    monkeypatch.setattr(AIClient, "_adapter_for", lambda self, provider: FakeAdapter(provider))
+
+    client = AIClient(
+        provider="gemini",
+        api_key="gemini-key",
+        api_source="GEMINI_API_KEY",
+        fast_model="gemini-2.5-flash",
+        deep_model="gemini-2.5-pro",
+        available_providers=("gemini", "groq", "xai"),
+    )
+
+    result = client.generate("hello")
+
+    assert result.text == "answered with groq"
+    assert result.provider == "groq"
+    assert any("Trying Groq with `llama-3.1-8b-instant`" in note for note in result.fallback_notes)
+
+
 def test_ai_client_uses_saved_xai_provider_selection(tmp_path: Path, monkeypatch) -> None:
     _clear_ai_caches()
     monkeypatch.setenv("DEVAGENT_CONFIG_DIR", str(tmp_path / "config-home"))
@@ -275,6 +320,25 @@ def test_ai_client_uses_saved_xai_provider_selection(tmp_path: Path, monkeypatch
     assert client.provider == "xai"
     assert client.fast_model == "grok-3-mini"
     assert client.deep_model == "grok-3-mini"
+    assert client.embedding_model is None
+
+
+def test_ai_client_uses_saved_groq_provider_selection(tmp_path: Path, monkeypatch) -> None:
+    _clear_ai_caches()
+    monkeypatch.setenv("DEVAGENT_CONFIG_DIR", str(tmp_path / "config-home"))
+    monkeypatch.setenv("GROQ_API_KEY", "groq-key")
+    ConfigManager.save_ai_settings(
+        AISettings(
+            selected_provider="groq",
+            providers={"groq": ProviderModelConfig(model="llama-3.1-8b-instant", deep_model="llama-3.3-70b-versatile")},
+        )
+    )
+
+    client = AIClient.from_env()
+
+    assert client.provider == "groq"
+    assert client.fast_model == "llama-3.1-8b-instant"
+    assert client.deep_model == "llama-3.3-70b-versatile"
     assert client.embedding_model is None
 
 
@@ -395,6 +459,34 @@ def test_ai_client_lists_xai_models_from_language_models_endpoint(monkeypatch) -
     assert all(model.capabilities == ("generate",) for model in models)
 
 
+def test_ai_client_lists_groq_models_and_filters_non_chat_models(monkeypatch) -> None:
+    _clear_ai_caches()
+    monkeypatch.setattr(
+        ai_module,
+        "fetch_json",
+        lambda url, headers: {
+            "data": [
+                {"id": "llama-3.1-8b-instant", "active": True},
+                {"id": "llama-3.3-70b-versatile", "active": True},
+                {"id": "whisper-large-v3", "active": True},
+                {"id": "meta-llama/llama-prompt-guard-2-86m", "active": True},
+                {"id": "openai/gpt-oss-20b", "active": True},
+                {"id": "openai/gpt-oss-safeguard-20b", "active": True},
+            ]
+        },
+    )
+
+    client = AIClient(provider="groq", api_key="groq-key", api_source="GROQ_API_KEY", available_providers=("groq",))
+    models = client.list_models(provider="groq", refresh=True)
+
+    assert [model.id for model in models] == [
+        "llama-3.1-8b-instant",
+        "llama-3.3-70b-versatile",
+        "openai/gpt-oss-20b",
+    ]
+    assert all(model.capabilities == ("generate",) for model in models)
+
+
 def test_ai_client_uses_xai_chat_completion_path(monkeypatch) -> None:
     _clear_ai_caches()
     captured: list[dict[str, object]] = []
@@ -422,6 +514,49 @@ def test_ai_client_uses_xai_chat_completion_path(monkeypatch) -> None:
     assert captured == [
         {
             "model": "grok-3-mini",
+            "messages": [
+                {"role": "system", "content": "Be helpful"},
+                {"role": "user", "content": "hello"},
+            ],
+        }
+    ]
+
+
+def test_ai_client_uses_groq_chat_completion_path(monkeypatch) -> None:
+    _clear_ai_caches()
+    captured: list[dict[str, object]] = []
+
+    class FakeChatCompletions:
+        def create(self, **kwargs):
+            captured.append(kwargs)
+            return types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(message=types.SimpleNamespace(content="groq says hi"))
+                ]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, api_key=None, base_url=None):
+            assert api_key == "groq-key"
+            assert base_url == "https://api.groq.com/openai/v1"
+            self.chat = types.SimpleNamespace(completions=FakeChatCompletions())
+
+    fake_openai = types.ModuleType("openai")
+    fake_openai.OpenAI = FakeOpenAI
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+    client = AIClient(
+        provider="groq",
+        api_key="groq-key",
+        api_source="GROQ_API_KEY",
+        fast_model="llama-3.1-8b-instant",
+        available_providers=("groq",),
+    )
+
+    assert client.complete("hello", system_instruction="Be helpful") == "groq says hi"
+    assert captured == [
+        {
+            "model": "llama-3.1-8b-instant",
             "messages": [
                 {"role": "system", "content": "Be helpful"},
                 {"role": "user", "content": "hello"},

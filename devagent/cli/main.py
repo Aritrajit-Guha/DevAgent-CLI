@@ -107,8 +107,9 @@ AI_HELP = dedent(
     Discover configured AI providers, browse visible models, and save defaults.
 
     Use this family when you want to see which providers DevAgent can use from
-    your current API keys, compare visible models, or switch the default
-    provider and model without editing environment variables by hand.
+    your current API keys, compare visible Gemini, Groq, or xAI models, or
+    switch the default provider and model without editing environment variables
+    by hand.
     """
 ).strip()
 
@@ -290,7 +291,7 @@ def ai_status(refresh: bool = typer.Option(False, "--refresh", help="Refresh vis
 
 @ai_app.command("models", help="List the models DevAgent can currently see for the configured providers.")
 def ai_models(
-    provider: Optional[str] = typer.Option(None, "--provider", help="Limit the model list to one provider, such as `gemini` or `xai`."),
+    provider: Optional[str] = typer.Option(None, "--provider", help="Limit the model list to one provider, such as `gemini`, `groq`, or `xai`."),
     refresh: bool = typer.Option(False, "--refresh", help="Refresh visible model data before listing models."),
 ) -> None:
     listings = _ai_actions().ai_models(provider=provider, refresh=refresh)
@@ -309,7 +310,7 @@ def ai_models(
 
 @ai_app.command("use", help="Save the default provider and model selection DevAgent should use for chat, edit, and other AI-powered flows.")
 def ai_use(
-    provider: Optional[str] = typer.Option(None, "--provider", help="Provider to save as the default, such as `gemini` or `xai`."),
+    provider: Optional[str] = typer.Option(None, "--provider", help="Provider to save as the default, such as `gemini`, `groq`, or `xai`."),
     model: Optional[str] = typer.Option(None, "--model", help="Default chat model for the chosen provider."),
     deep_model: Optional[str] = typer.Option(None, "--deep-model", help="Default deep-synthesis model for the chosen provider."),
     embedding_model: Optional[str] = typer.Option(None, "--embedding-model", help="Default embedding model for the chosen provider when supported."),
