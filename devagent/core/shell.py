@@ -11,7 +11,7 @@ from rich.prompt import Confirm, Prompt
 
 from devagent.cli.prompts import MenuChoice, choose_directory, choose_menu_action
 from devagent.cli.renderers import (
-    ai_models_renderable,
+    ai_models_collection_renderable,
     ai_selection_renderable,
     ai_status_renderable,
     commit_suggestion_renderable,
@@ -29,7 +29,7 @@ from devagent.cli.renderers import (
     workspace_status_table,
 )
 from devagent.cli.ui import app_panel, console, hero_panel, render_chat_markdown
-from devagent.core.actions import DevAgentActions, PullOutcome, PullRequestPreview, PushOutcome, RunProfile, RunLaunchResult, WorkspaceSnapshot
+from devagent.core.actions import AISelectionResult, DevAgentActions, PullOutcome, PullRequestPreview, PushOutcome, RunProfile, RunLaunchResult, WorkspaceSnapshot
 from devagent.tools.git_tool import GitError, GitRemote
 
 
@@ -498,8 +498,8 @@ class AgentShell:
         listings = self.actions.ai_models(provider=provider, refresh=True)
         if not listings:
             return ShellResult("AI Models", "No AI providers are configured yet. Add a supported API key first.", "warning")
-        renderables = [ai_models_renderable(listing) for listing in listings]
-        return ShellResult("AI Models", Group(*renderables), "info", use_panel=False)
+        renderable = ai_models_collection_renderable(listings, show_error_detail=provider is not None)
+        return ShellResult("AI Models", renderable, "info", use_panel=False)
 
     def workspace_status_result(self) -> ShellResult:
         snapshot = self.actions.workspace_status()
@@ -528,6 +528,17 @@ class AgentShell:
         current = status.selected_provider or provider_names[0]
         provider = self.choose_named_value("Choose the default provider", provider_names, default=current)
         selection = self.actions.save_ai_selection(provider=provider)
+        provider_status = next((item for item in status.providers if item.provider == provider), None)
+        if provider_status and provider_status.error:
+            selection = AISelectionResult(
+                provider=selection.provider,
+                fast_model=selection.fast_model,
+                deep_model=selection.deep_model,
+                embedding_model=selection.embedding_model,
+                warnings=(
+                    f"Saved provider `{provider}`, but DevAgent could not verify its visible models right now. {provider_status.error}",
+                ),
+            )
         return ShellResult("AI Selection Saved", ai_selection_renderable(selection), "success", use_panel=False)
 
     def set_default_model_action(self, *, kind: str) -> ShellResult:

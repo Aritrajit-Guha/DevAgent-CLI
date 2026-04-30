@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from rich.console import Console
 from typer.testing import CliRunner
 
 from devagent.cli.main import app
@@ -419,6 +420,33 @@ def test_ai_status_command_renders_without_a_bound_workspace(monkeypatch) -> Non
     assert "grok-3-mini" in result.stdout
 
 
+def test_ai_status_command_keeps_unavailable_provider_summary_compact(monkeypatch) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr("devagent.cli.main.interactive_terminal", lambda: False)
+
+    class FakeActions:
+        def ai_status(self, refresh=False):
+            return AIStatusSnapshot(
+                selected_provider="groq",
+                fast_model="llama-3.1-8b-instant",
+                deep_model="llama-3.3-70b-versatile",
+                embedding_model=None,
+                providers=(
+                    AIProviderStatus("groq", "GROQ_API_KEY", True, generation_models=11, embedding_models=0),
+                    AIProviderStatus("xai", "XAI_API_KEY", False, generation_models=0, embedding_models=0, error="HTTP 403 Forbidden: credits or licenses yet."),
+                ),
+                warnings=("xAI: HTTP 403 Forbidden: credits or licenses yet.",),
+            )
+
+    monkeypatch.setattr("devagent.cli.main._ai_actions", lambda: FakeActions())
+
+    result = runner.invoke(app, ["ai", "status"])
+
+    assert result.exit_code == 0
+    assert "xAI | XAI_API_KEY | unavailable" in result.stdout
+    assert "credits or licenses yet" not in result.stdout
+
+
 def test_ai_models_command_renders_partial_success(monkeypatch) -> None:
     runner = CliRunner()
     monkeypatch.setattr("devagent.cli.main.interactive_terminal", lambda: False)
@@ -445,8 +473,9 @@ def test_ai_models_command_renders_partial_success(monkeypatch) -> None:
     assert result.exit_code == 0
     assert "gemini Models" in result.stdout
     assert "gemini-2.5-flash" in result.stdout
-    assert "xai Models" in result.stdout
-    assert "credits or licenses yet" in result.stdout
+    assert "Unavailable providers hidden: xAI" in result.stdout
+    assert "xai Models" not in result.stdout
+    assert "credits or licenses yet" not in result.stdout
 
 
 def test_ai_models_command_shows_provider_specific_failure_for_broken_provider(monkeypatch) -> None:
@@ -509,6 +538,7 @@ def test_ai_use_provider_only_saves_when_discovery_is_unavailable(monkeypatch) -
     assert calls == ["xai"]
     assert "AI Selection Saved" in result.stdout
     assert "grok-3-mini" in result.stdout
+    assert "credits or licenses yet" in result.stdout
 
 
 def test_ai_use_rejects_embedding_model_for_groq(monkeypatch) -> None:
@@ -635,6 +665,38 @@ def test_shell_can_save_ai_provider_selection(tmp_path: Path) -> None:
     assert result.title == "AI Selection Saved"
     assert result.use_panel is False
     assert calls == ["xai"]
+
+
+def test_shell_saving_unavailable_provider_shows_the_full_reason() -> None:
+    workspace = Path("codex_test_tmp/shell-ai-provider-warning").resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
+    shell = AgentShell(workspace)
+
+    shell.actions.ai_status = lambda refresh=False: AIStatusSnapshot(
+        selected_provider="gemini",
+        fast_model="gemini-2.5-flash",
+        deep_model="gemini-2.5-pro",
+        embedding_model="gemini-embedding-001",
+        providers=(
+            AIProviderStatus("gemini", "GEMINI_API_KEY", True, generation_models=2, embedding_models=1),
+            AIProviderStatus("xai", "XAI_API_KEY", False, generation_models=0, embedding_models=0, error="HTTP 403 Forbidden: credits or licenses yet."),
+        ),
+    )
+    shell.actions.save_ai_selection = lambda **kwargs: AISelectionResult(
+        provider=kwargs["provider"],
+        fast_model="grok-3-mini",
+        deep_model="grok-3-mini",
+        embedding_model=None,
+    )
+    shell.choose_named_value = lambda *args, **kwargs: "xai"
+
+    result = shell.set_default_provider_action()
+    console = Console(record=True, width=120)
+    console.print(result.message)
+    rendered = console.export_text()
+
+    assert result.title == "AI Selection Saved"
+    assert "credits or licenses yet" in rendered
 
 
 def test_devagent_no_args_with_missing_bound_workspace_shows_recovery(monkeypatch, tmp_path: Path) -> None:

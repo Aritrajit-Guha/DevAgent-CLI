@@ -206,7 +206,7 @@ def ai_status_renderable(status: AIStatusSnapshot) -> RenderableType:
             if provider.api_source:
                 details.append(provider.api_source)
             if provider.error:
-                details.append(f"unavailable: {provider.error}")
+                details.append("unavailable")
             else:
                 details.append(f"{provider.generation_models} chat")
                 if provider.embedding_models:
@@ -217,19 +217,28 @@ def ai_status_renderable(status: AIStatusSnapshot) -> RenderableType:
         table.add_row("Configured providers", "\n".join(provider_lines))
     else:
         table.add_row("Configured providers", "none")
-    if status.warnings:
-        table.add_row("Warnings", "\n".join(f"- {warning}" for warning in status.warnings))
+    visible_warnings = [
+        warning
+        for warning in status.warnings
+        if warning not in {
+            f"{provider.label}: {provider.error}"
+            for provider in status.providers
+            if provider.error
+        }
+    ]
+    if visible_warnings:
+        table.add_row("Warnings", "\n".join(f"- {warning}" for warning in visible_warnings))
     return table
 
 
-def ai_models_renderable(listing: ProviderModelListing) -> RenderableType:
+def ai_models_renderable(listing: ProviderModelListing, *, show_error_detail: bool = True) -> RenderableType:
     table = app_table(f"{listing.provider} Models")
     table.add_column("Model")
     table.add_column("Label")
     table.add_column("Capabilities")
     table.add_column("Aliases")
     if listing.error:
-        table.add_row("unavailable", listing.error, "-", "-")
+        table.add_row("unavailable", listing.error if show_error_detail else "Provider is unavailable right now.", "-", "-")
         return table
     if not listing.models:
         table.add_row("none", "No visible models for this provider.", "-", "-")
@@ -242,6 +251,24 @@ def ai_models_renderable(listing: ProviderModelListing) -> RenderableType:
             ", ".join(model.aliases[1:4]) or "-",
         )
     return table
+
+
+def ai_models_collection_renderable(
+    listings: list[ProviderModelListing],
+    *,
+    show_error_detail: bool = False,
+) -> RenderableType:
+    hidden = [listing.label for listing in listings if listing.error and not listing.models]
+    visible_renderables = [
+        ai_models_renderable(listing, show_error_detail=show_error_detail)
+        for listing in listings
+        if not listing.error or listing.models or show_error_detail
+    ]
+    if hidden and not show_error_detail:
+        visible_renderables.append(toned_message(f"Unavailable providers hidden: {', '.join(hidden)}", "warning"))
+    if not visible_renderables:
+        return toned_message("No providers are currently available right now.", "warning")
+    return Group(*visible_renderables)
 
 
 def ai_selection_renderable(selection: AISelectionResult) -> RenderableType:

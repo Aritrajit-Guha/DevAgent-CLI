@@ -9,7 +9,7 @@ from rich.prompt import Confirm, Prompt
 
 from devagent.cli.prompts import MenuChoice, can_use_arrow_menu, choose_directory, choose_menu_action
 from devagent.cli.renderers import (
-    ai_models_renderable,
+    ai_models_collection_renderable,
     ai_selection_renderable,
     ai_status_renderable,
     commit_suggestion_renderable,
@@ -299,13 +299,24 @@ def ai_models(
         console.print(app_panel("No AI providers are configured yet. Add a supported API key first.", "AI Models", tone="warning", expand=False))
         raise typer.Exit(code=1)
     if all(listing.error and not listing.models for listing in listings):
-        details = "\n".join(f"- {listing.label}: {listing.error}" for listing in listings)
-        console.print(app_panel(f"DevAgent could not load live models for the requested provider(s).\n\n{details}", "AI Models", tone="warning", expand=False))
+        if provider:
+            details = "\n".join(f"- {listing.label}: {listing.error}" for listing in listings)
+            console.print(app_panel(f"DevAgent could not load live models for the requested provider(s).\n\n{details}", "AI Models", tone="warning", expand=False))
+        else:
+            hidden = ", ".join(listing.label for listing in listings)
+            console.print(
+                app_panel(
+                    f"No AI providers are currently available right now.\n\nUnavailable providers: {hidden}\nUse `devagent ai models --provider <name>` to inspect a specific provider.",
+                    "AI Models",
+                    tone="warning",
+                    expand=False,
+                )
+            )
         raise typer.Exit(code=1)
-    for index, listing in enumerate(listings):
-        if index:
-            console.print()
-        console.print(ai_models_renderable(listing))
+    if provider:
+        console.print(ai_models_collection_renderable(listings, show_error_detail=True))
+    else:
+        console.print(ai_models_collection_renderable(listings, show_error_detail=False))
 
 
 @ai_app.command("use", help="Save the default provider and model selection DevAgent should use for chat, edit, and other AI-powered flows.")
@@ -339,6 +350,11 @@ def ai_use(
             deferred_validation_warning = (
                 f"Could not verify the visible models for {chosen_provider} right now. "
                 f"Saved the explicit model values as provided. {listing.error}"
+            )
+        else:
+            deferred_validation_warning = (
+                f"Saved provider `{chosen_provider}`, but DevAgent could not verify its visible models right now. "
+                f"{listing.error}"
             )
     else:
         if model and generation_ids and model not in generation_ids:
