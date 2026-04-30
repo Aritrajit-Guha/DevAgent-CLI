@@ -461,20 +461,26 @@ def test_ai_client_lists_xai_models_from_language_models_endpoint(monkeypatch) -
 
 def test_ai_client_lists_groq_models_and_filters_non_chat_models(monkeypatch) -> None:
     _clear_ai_caches()
-    monkeypatch.setattr(
-        ai_module,
-        "fetch_json",
-        lambda url, headers: {
-            "data": [
-                {"id": "llama-3.1-8b-instant", "active": True},
-                {"id": "llama-3.3-70b-versatile", "active": True},
-                {"id": "whisper-large-v3", "active": True},
-                {"id": "meta-llama/llama-prompt-guard-2-86m", "active": True},
-                {"id": "openai/gpt-oss-20b", "active": True},
-                {"id": "openai/gpt-oss-safeguard-20b", "active": True},
+
+    class FakeModels:
+        def list(self):
+            return [
+                types.SimpleNamespace(id="llama-3.1-8b-instant", active=True),
+                types.SimpleNamespace(id="llama-3.3-70b-versatile", active=True),
+                types.SimpleNamespace(id="whisper-large-v3", active=True),
+                types.SimpleNamespace(id="meta-llama/llama-prompt-guard-2-86m", active=True),
+                types.SimpleNamespace(id="openai/gpt-oss-20b", active=True),
+                types.SimpleNamespace(id="openai/gpt-oss-safeguard-20b", active=True),
             ]
-        },
-    )
+
+    class FakeOpenAI:
+        def __init__(self, api_key=None, base_url=None):
+            self.models = FakeModels()
+            self.chat = types.SimpleNamespace(completions=None)
+
+    fake_openai = types.ModuleType("openai")
+    fake_openai.OpenAI = FakeOpenAI
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
 
     client = AIClient(provider="groq", api_key="groq-key", api_source="GROQ_API_KEY", available_providers=("groq",))
     models = client.list_models(provider="groq", refresh=True)

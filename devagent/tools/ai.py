@@ -971,11 +971,15 @@ class GroqAdapter(XAIAdapter):
         if cached is not None:
             return list(cached)
 
-        payload = fetch_json(
-            f"{self.base_url}/models",
-            headers={"Authorization": f"Bearer {self.credentials.api_key}"},
-        )
-        models = [normalize_groq_model(item) for item in extract_model_items(payload)]
+        try:
+            raw_models = list(self._get_client().models.list())
+            models = [normalize_groq_model(item) for item in raw_models]
+        except Exception:
+            payload = fetch_json(
+                f"{self.base_url}/models",
+                headers={"Authorization": f"Bearer {self.credentials.api_key}"},
+            )
+            models = [normalize_groq_model(item) for item in extract_model_items(payload)]
         filtered = [model for model in models if model.capabilities]
         _MODEL_CACHE[cache_key] = tuple(filtered)
         return filtered
