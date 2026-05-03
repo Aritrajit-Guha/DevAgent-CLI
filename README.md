@@ -138,9 +138,12 @@ Install these first:
 ### Fresh install
 
 ```cmd
-pipx install git+https://github.com/Aritrajit-Guha/DevAgent-CLI.git
+pipx install git+https://github.com/Aritrajit-Guha/DevAgent-CLI.git 
 ```
-
+or
+```cmd
+pipx install git+https://github.com/SweetyPaul19/DevAgent-CLI.git
+```
 ### Upgrade an existing install
 
 ```cmd
@@ -155,6 +158,11 @@ reinstall:
 ```cmd
 pipx uninstall devagent-cli
 pipx install git+https://github.com/Aritrajit-Guha/DevAgent-CLI.git
+```
+Or
+```cmd
+pipx uninstall devagent-cli
+pipx install git+https://github.com/SweetyPaul19/DevAgent-CLI.git
 ```
 
 Use reinstall when you want to be absolutely sure your `pipx` environment is
