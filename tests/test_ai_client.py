@@ -27,6 +27,72 @@ def test_resolve_api_credentials_prefers_gemini_over_google_groq_and_xai(monkeyp
     assert resolve_api_credentials("xai") == ("xai-key", "XAI_API_KEY")
 
 
+def test_resolve_api_credentials_includes_openrouter(monkeypatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
+
+    assert resolve_api_credentials("openrouter") == ("openrouter-key", "OPENROUTER_API_KEY")
+
+
+def test_ai_client_uses_openrouter_chat_completion_path(monkeypatch) -> None:
+    _clear_ai_caches()
+    captured: list[dict[str, object]] = []
+
+    class FakeChatCompletions:
+        def create(self, **kwargs):
+            captured.append(kwargs)
+            return types.SimpleNamespace(
+                choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="openrouter says hi"))]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, api_key=None, base_url=None, default_headers=None):
+            assert api_key == "openrouter-key"
+            assert base_url == "https://openrouter.ai/api/v1"
+            assert default_headers == {"HTTP-Referer": "https://example.test", "X-OpenRouter-Title": "DevAgent"}
+            self.chat = types.SimpleNamespace(completions=FakeChatCompletions())
+
+    fake_openai = types.ModuleType("openai")
+    fake_openai.OpenAI = FakeOpenAI
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+    monkeypatch.setenv("OPENROUTER_HTTP_REFERER", "https://example.test")
+    monkeypatch.setenv("OPENROUTER_TITLE", "DevAgent")
+
+    client = AIClient(
+        provider="openrouter",
+        api_key="openrouter-key",
+        api_source="OPENROUTER_API_KEY",
+        fast_model="openai/gpt-4o-mini",
+        available_providers=("openrouter",),
+    )
+
+    assert client.complete("hello", system_instruction="Be helpful") == "openrouter says hi"
+    assert captured == [{
+        "model": "openai/gpt-4o-mini",
+        "messages": [
+            {"role": "system", "content": "Be helpful"},
+            {"role": "user", "content": "hello"},
+        ],
+    }]
+
+
+def test_ai_client_lists_openrouter_models(monkeypatch) -> None:
+    _clear_ai_caches()
+    monkeypatch.setattr(
+        ai_module,
+        "fetch_json",
+        lambda *args, **kwargs: {"data": [
+            {"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini", "architecture": {"input_modalities": ["text"]}},
+            {"id": "openai/text-embedding-3-small", "name": "Embedding", "architecture": {"input_modalities": ["text"]}},
+        ]},
+    )
+
+    client = AIClient(provider="openrouter", api_key="openrouter-key", api_source="OPENROUTER_API_KEY", available_providers=("openrouter",))
+    models = client.list_models(provider="openrouter", refresh=True)
+
+    assert [model.id for model in models] == ["openai/gpt-4o-mini"]
+    assert models[0].provider == "openrouter"
+
+
 def test_selected_api_environment_hides_the_other_google_key(monkeypatch) -> None:
     monkeypatch.setenv("GOOGLE_API_KEY", "google-key")
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")

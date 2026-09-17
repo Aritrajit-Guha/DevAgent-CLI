@@ -12,8 +12,8 @@ from devagent.config.settings import ConfigManager, ProviderModelConfig
 
 GENERATION_CAPABILITY = "generate"
 EMBED_CAPABILITY = "embed"
-PROVIDER_ORDER = ("gemini", "groq", "xai")
-PROVIDER_LABELS = {"gemini": "Gemini", "groq": "Groq", "xai": "xAI"}
+PROVIDER_ORDER = ("gemini", "groq", "xai", "openrouter")
+PROVIDER_LABELS = {"gemini": "Gemini", "groq": "Groq", "xai": "xAI", "openrouter": "OpenRouter"}
 TRANSIENT_BACKOFF_SECONDS = (3.0, 5.0)
 GEMINI_DEFAULT_FAST_MODEL = "gemini-2.5-flash"
 GEMINI_DEFAULT_DEEP_MODEL = "gemini-2.5-pro"
@@ -21,6 +21,8 @@ GEMINI_DEFAULT_EMBEDDING_MODEL = "gemini-embedding-001"
 GROQ_DEFAULT_FAST_MODEL = "llama-3.1-8b-instant"
 GROQ_DEFAULT_DEEP_MODEL = "llama-3.1-8b-instant"
 XAI_DEFAULT_FAST_MODEL = "grok-3-mini"
+OPENROUTER_DEFAULT_FAST_MODEL = "openai/gpt-4o-mini"
+OPENROUTER_DEFAULT_DEEP_MODEL = "openai/gpt-4o-mini"
 TRANSIENT_SERVER_ERROR = "transient_server"
 QUOTA_EXHAUSTED_ERROR = "quota_exhausted"
 MODEL_UNAVAILABLE_ERROR = "model_unavailable"
@@ -480,6 +482,8 @@ class AIClient:
             return GROQ_DEFAULT_DEEP_MODEL if deep else GROQ_DEFAULT_FAST_MODEL
         if provider == "xai" and capability == GENERATION_CAPABILITY:
             return XAI_DEFAULT_FAST_MODEL
+        if provider == "openrouter" and capability == GENERATION_CAPABILITY:
+            return OPENROUTER_DEFAULT_DEEP_MODEL if deep else OPENROUTER_DEFAULT_FAST_MODEL
         return None
 
     def _credentials_for(self, provider: str) -> ProviderCredentials | None:
@@ -497,6 +501,8 @@ class AIClient:
             return GroqAdapter(credentials)
         if provider == "xai":
             return XAIAdapter(credentials)
+        if provider == "openrouter":
+            return OpenRouterAdapter(credentials)
         raise RuntimeError(f"Unsupported AI provider `{provider}`.")
 
 
@@ -572,6 +578,9 @@ def resolve_available_credentials() -> dict[str, ProviderCredentials]:
     xai_key = os.environ.get("XAI_API_KEY")
     if xai_key:
         credentials["xai"] = ProviderCredentials("xai", xai_key, "XAI_API_KEY")
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+    if openrouter_key:
+        credentials["openrouter"] = ProviderCredentials("openrouter", openrouter_key, "OPENROUTER_API_KEY")
     return credentials
 
 
@@ -602,6 +611,11 @@ def provider_env_model(provider: str, kind: str) -> str | None:
             return os.environ.get("XAI_MODEL_DEEP")
         if kind == "embedding_model":
             return os.environ.get("XAI_EMBEDDING_MODEL")
+    if provider == "openrouter":
+        if kind == "model":
+            return os.environ.get("OPENROUTER_MODEL_FAST") or os.environ.get("OPENROUTER_MODEL")
+        if kind == "deep_model":
+            return os.environ.get("OPENROUTER_MODEL_DEEP")
     return None
 
 
@@ -623,6 +637,8 @@ def default_model_for_provider(provider: str, *, capability: str, deep: bool) ->
         return GROQ_DEFAULT_DEEP_MODEL if deep else GROQ_DEFAULT_FAST_MODEL
     if provider == "xai" and capability == GENERATION_CAPABILITY:
         return XAI_DEFAULT_FAST_MODEL
+    if provider == "openrouter" and capability == GENERATION_CAPABILITY:
+        return OPENROUTER_DEFAULT_DEEP_MODEL if deep else OPENROUTER_DEFAULT_FAST_MODEL
     return None
 
 
@@ -800,6 +816,7 @@ def selected_api_environment(api_key: str | None, api_source: str | None) -> Ite
     original_google = os.environ.get("GOOGLE_API_KEY")
     original_groq = os.environ.get("GROQ_API_KEY")
     original_xai = os.environ.get("XAI_API_KEY")
+    original_openrouter = os.environ.get("OPENROUTER_API_KEY")
     try:
         if api_source == "GEMINI_API_KEY" and api_key:
             os.environ["GEMINI_API_KEY"] = api_key
@@ -811,12 +828,15 @@ def selected_api_environment(api_key: str | None, api_source: str | None) -> Ite
             os.environ["GROQ_API_KEY"] = api_key
         elif api_source == "XAI_API_KEY" and api_key:
             os.environ["XAI_API_KEY"] = api_key
+        elif api_source == "OPENROUTER_API_KEY" and api_key:
+            os.environ["OPENROUTER_API_KEY"] = api_key
         yield
     finally:
         restore_environment_value("GEMINI_API_KEY", original_gemini)
         restore_environment_value("GOOGLE_API_KEY", original_google)
         restore_environment_value("GROQ_API_KEY", original_groq)
         restore_environment_value("XAI_API_KEY", original_xai)
+        restore_environment_value("OPENROUTER_API_KEY", original_openrouter)
 
 
 def load_dotenv_if_available() -> None:
@@ -959,6 +979,52 @@ class XAIAdapter:
         return client
 
 
+class OpenRouterAdapter(XAIAdapter):
+    """OpenAI-compatible adapter for OpenRouter's unified model gateway."""
+
+    provider = "openrouter"
+    base_url = "https://openrouter.ai/api/v1"
+
+    def list_models(self, *, refresh: bool = False) -> list[DiscoveredModel]:
+        cache_key = (self.provider, self.credentials.api_key)
+        if refresh:
+            _MODEL_CACHE.pop(cache_key, None)
+        cached = _MODEL_CACHE.get(cache_key)
+        if cached is not None:
+            return list(cached)
+
+        payload = fetch_json(
+            f"{self.base_url}/models",
+            headers={"Authorization": f"Bearer {self.credentials.api_key}"},
+        )
+        models = [normalize_openrouter_model(item) for item in extract_model_items(payload)]
+        filtered = [model for model in models if model.capabilities]
+        _MODEL_CACHE[cache_key] = tuple(filtered)
+        return filtered
+
+    def _get_client(self):
+        cache_key = (self.provider, self.credentials.api_key, self.base_url)
+        cached = _CLIENT_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        from openai import OpenAI
+
+        default_headers = {}
+        referer = os.environ.get("OPENROUTER_HTTP_REFERER")
+        title = os.environ.get("OPENROUTER_TITLE")
+        if referer:
+            default_headers["HTTP-Referer"] = referer
+        if title:
+            default_headers["X-OpenRouter-Title"] = title
+        client = OpenAI(
+            api_key=self.credentials.api_key,
+            base_url=self.base_url,
+            default_headers=default_headers or None,
+        )
+        _CLIENT_CACHE[cache_key] = client
+        return client
+
+
 class GroqAdapter(XAIAdapter):
     provider = "groq"
     base_url = "https://api.groq.com/openai/v1"
@@ -1036,6 +1102,26 @@ def normalize_xai_model(raw) -> DiscoveredModel:
         capabilities=(GENERATION_CAPABILITY,),
         modalities=tuple(modalities),
         aliases=tuple(unique_preserving_order([model_id, *aliases])),
+    )
+
+
+def normalize_openrouter_model(raw) -> DiscoveredModel:
+    model_id = str(extract_attr(raw, "id") or extract_attr(raw, "name") or "")
+    label = extract_attr(raw, "name") or model_id
+    architecture = extract_attr(raw, "architecture") or {}
+    modalities = normalize_string_values(
+        extract_attr(raw, "input_modalities")
+        or extract_attr(raw, "inputModalities")
+        or (architecture.get("input_modalities") if isinstance(architecture, dict) else [])
+    )
+    capabilities = () if "embed" in model_id.casefold() else (GENERATION_CAPABILITY,)
+    return DiscoveredModel(
+        provider="openrouter",
+        id=model_id,
+        label=str(label),
+        capabilities=capabilities,
+        modalities=tuple(modalities),
+        aliases=(model_id,),
     )
 
 

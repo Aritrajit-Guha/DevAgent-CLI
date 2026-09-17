@@ -116,6 +116,8 @@ DevAgent currently supports these providers:
 
 - Gemini
 - xAI
+- Groq
+- OpenRouter
 
 It can detect providers from the API keys you already have, list visible models
 for those providers, and save a default provider/model choice for chat, edit,
@@ -171,6 +173,8 @@ DevAgent currently looks for these provider keys:
 - `GEMINI_API_KEY`
 - `GOOGLE_API_KEY`
 - `XAI_API_KEY`
+- `GROQ_API_KEY`
+- `OPENROUTER_API_KEY`
 
 ### Gemini model environment variables
 
@@ -182,6 +186,9 @@ These are the current Gemini model-related environment variables:
 - `GEMINI_EMBEDDING_MODEL`
 
 `GEMINI_MODEL_FAST` and `GEMINI_MODEL` both act as the chat-model override.
+For OpenRouter, use `OPENROUTER_MODEL_FAST`, `OPENROUTER_MODEL`, and
+`OPENROUTER_MODEL_DEEP`; values must be OpenRouter model IDs such as
+`openai/gpt-4o-mini`.
 
 ### Simplest practical setup
 
@@ -215,6 +222,13 @@ If you also have xAI configured:
 
 ```cmd
 devagent ai use --provider xai --model grok-3-mini --deep-model grok-3-mini
+```
+
+If you use OpenRouter, set `OPENROUTER_API_KEY` and choose an OpenRouter model
+ID, for example:
+
+```cmd
+devagent ai use --provider openrouter --model openai/gpt-4o-mini --deep-model openai/gpt-4o-mini
 ```
 
 ### Important caveat about provider availability
