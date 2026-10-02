@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from textwrap import dedent
-from typing import Optional
+from typing import NoReturn, Optional
 
 import typer
 from rich.prompt import Confirm, Prompt
@@ -23,7 +23,7 @@ from devagent.cli.renderers import (
     run_launch_message,
     workspace_status_table,
 )
-from devagent.cli.ui import app_panel, app_table, console, hero_panel, render_chat_markdown, status_badge, styled_path, toned_message
+from devagent.cli.ui import app_panel, app_table, console, diff_renderable, hero_panel, render_chat_markdown, status_badge, styled_path, toned_message
 from devagent.config.settings import ConfigManager
 from devagent.core.actions import DevAgentActions, bind_workspace_action, snapshot_workspace
 from devagent.core.shell import AgentShell, git_menu_choices, interactive_terminal
@@ -175,10 +175,16 @@ def _workspace_path(explicit: Optional[Path] = None) -> Path:
         return resolved
     state, bound_path = _bound_workspace_state()
     if state == "unbound":
-        raise typer.BadParameter("No workspace is bound. Run `devagent workspace bind <path>` first.")
+        _exit_with_workspace_problem("No workspace is bound yet.\n\nRun `devagent workspace bind <path>` to choose one.", "Workspace Not Bound")
     if state == "missing":
-        raise typer.BadParameter(_missing_workspace_message(bound_path))
+        _exit_with_workspace_problem(_missing_workspace_message(bound_path), "Workspace Missing")
     return bound_path
+
+
+def _exit_with_workspace_problem(message: str, title: str) -> NoReturn:
+    """Explain a workspace problem and stop. Not a usage error, so no Usage/--help block."""
+    console.print(app_panel(message, title, tone="warning", expand=False))
+    raise typer.Exit(code=1)
 
 
 def _print_project_status(path: Path) -> None:
@@ -224,11 +230,14 @@ def _missing_workspace_message(path: Path | None) -> str:
     )
 
 
-def _print_run_menu() -> None:
+def _print_run_inventory() -> None:
     actions = _actions()
-    inventory = actions.run_inventory()
+    console.print(run_inventory_renderable(actions.workspace, actions.run_inventory()))
+
+
+def _print_run_menu() -> None:
     console.print(hero_panel("Runtime Agent", "Spin up services, attach environments, and open the app in one move."))
-    console.print(run_inventory_renderable(actions.workspace, inventory))
+    _print_run_inventory()
 
 
 def _print_git_menu() -> None:
@@ -574,7 +583,8 @@ def run_save(
 
 @run_app.command("list")
 def run_list() -> None:
-    _print_run_menu()
+    # A list command lists; the banner belongs to the bare `devagent run` landing screen.
+    _print_run_inventory()
 
 
 @run_app.command("forget")
@@ -602,7 +612,7 @@ def edit(
             proposal = actions.edit_propose(instruction, progress_callback=status.update)
     else:
         proposal = actions.edit_propose(instruction)
-    console.print(app_panel(proposal.diff or proposal.message, "Proposed Change", tone="info"))
+    console.print(app_panel(diff_renderable(proposal.diff) if proposal.diff else proposal.message, "Proposed Change", tone="info"))
     if not proposal.diff:
         raise typer.Exit(code=1)
     if yes or typer.confirm("Apply this diff?"):
